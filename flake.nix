@@ -39,10 +39,11 @@
             ./modules/master-agent
             ./modules/mcp-servers
 
+            # Phase 5: Memory graph
+            ./modules/memory
+
             # Phase 3+:
-            # ./modules/capability-manager
-            # ./modules/skills
-            # ./modules/memory
+            # ./modules/gpu
             # ./modules/awareness
           ]
           # GPU module only for x86_64 (NVIDIA/CUDA)
