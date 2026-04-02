@@ -11,8 +11,17 @@ let
     CLAUDE_PROJECT_DIR="$HOME/.claude/projects/-var-lib-claude-os"
     NPM_GLOBAL="/home/claude/.npm-global"
 
-    export PATH="$NPM_GLOBAL/bin:$PATH"
+    export PATH="$NPM_GLOBAL/bin:/run/current-system/sw/bin:$PATH"
     export NPM_CONFIG_PREFIX="$NPM_GLOBAL"
+
+    # If SSH passes a command (non-interactive), run it directly in bash
+    if [ -n "$SSH_ORIGINAL_COMMAND" ]; then
+      exec /run/current-system/sw/bin/bash -c "$SSH_ORIGINAL_COMMAND"
+    fi
+    # If invoked with -c (as login shell with command), run the command
+    if [ "$1" = "-c" ] && [ -n "$2" ]; then
+      exec /run/current-system/sw/bin/bash -c "$2"
+    fi
 
     # --- Ensure state directory exists ---
     mkdir -p "$STATE_DIR" 2>/dev/null || true
@@ -44,12 +53,28 @@ SYSTEM_PROMPT
         > "$STATE_DIR/agents/inbox/shell-login-$$.json" 2>/dev/null || true
     fi
 
+    # Set up logout notification trap
+    cleanup() {
+      if [ -d "$STATE_DIR/agents/inbox" ]; then
+        echo "{\"type\": \"shell-logout\", \"pid\": $$, \"timestamp\": \"$(date -Iseconds)\"}" \
+          > "$STATE_DIR/agents/inbox/shell-logout-$$.json" 2>/dev/null || true
+      fi
+      rm -rf "$SESSION_DIR" 2>/dev/null || true
+    }
+    trap cleanup EXIT
+
     # --- Launch Claude ---
     export CLAUDE_OS_STATE="$STATE_DIR"
     export CLAUDE_OS_SESSION="$SESSION_DIR"
 
     # Change to state directory (or home if not available yet)
     cd "$STATE_DIR" 2>/dev/null || cd "$HOME"
+
+    # Build MCP config argument if available
+    MCP_ARG=""
+    if [ -f "$STATE_DIR/mcp-config.json" ]; then
+      MCP_ARG="--mcp-config $STATE_DIR/mcp-config.json"
+    fi
 
     # Wait for the install service if claude is not yet available
     if ! command -v claude >/dev/null 2>&1; then
@@ -71,7 +96,7 @@ SYSTEM_PROMPT
     if command -v claude >/dev/null 2>&1; then
       echo "Claude Code is ready. Launching..."
       echo ""
-      exec claude --dangerously-skip-permissions "$@"
+      exec claude --dangerously-skip-permissions $MCP_ARG "$@"
     else
       echo ""
       echo "Claude Code is not yet available."

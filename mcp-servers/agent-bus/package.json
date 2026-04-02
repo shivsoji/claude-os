@@ -1,0 +1,19 @@
+{
+  "name": "@claude-os/agent-bus",
+  "version": "0.1.0",
+  "description": "MCP server for inter-agent communication in Claude-OS",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "build": "tsc",
+    "dev": "node --watch src/index.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0",
+    "@types/node": "^22.0.0"
+  }
+}

@@ -35,13 +35,15 @@
               nixpkgs.config.allowUnfree = true;
             })
 
-            # Phase 2+:
-            # ./modules/master-agent
+            # Phase 2: Master agent + MCP servers
+            ./modules/master-agent
+            ./modules/mcp-servers
+
+            # Phase 3+:
             # ./modules/capability-manager
             # ./modules/skills
             # ./modules/memory
             # ./modules/awareness
-            # ./modules/mcp-servers
           ]
           # GPU module only for x86_64 (NVIDIA/CUDA)
           ++ nixpkgs.lib.optionals enableGpu [
