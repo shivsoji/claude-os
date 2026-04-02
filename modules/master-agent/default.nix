@@ -3,163 +3,177 @@
 let
   claudeMdMaster = import ./claude-md-master.nix { inherit config pkgs lib; };
 
-  # Script that watches the message bus and dispatches to Claude
+  # The evolution engine CLI — called by Claude to mutate the system
+  evolutionEngine = pkgs.writeShellScriptBin "claude-os-evolve" (builtins.readFile ./evolve.sh);
+
+  # The capability manager CLI — called by Claude to acquire tools
+  capabilityManager = pkgs.writeShellScriptBin "claude-os-cap" (builtins.readFile ./capability-manager.sh);
+
+  # The goal planner CLI — structures goals into plans
+  goalPlanner = pkgs.writeShellScriptBin "claude-os-plan" (builtins.readFile ./goal-planner.sh);
+
+  # Master agent launcher — starts Claude as a persistent daemon
   masterAgent = pkgs.writeShellScriptBin "claude-os-master" ''
     set -uo pipefail
 
     STATE_DIR="/var/lib/claude-os"
-    AGENTS_DIR="$STATE_DIR/agents"
-    INBOX="$AGENTS_DIR/inbox"
+    MASTER_DIR="$STATE_DIR/agents/master"
+    GENOME_DIR="$STATE_DIR/genome"
     LOG="/var/log/claude-os-master.log"
 
-    export PATH="/home/claude/.npm-global/bin:$PATH"
+    export PATH="/home/claude/.npm-global/bin:${pkgs.jq}/bin:${pkgs.nodejs_22}/bin:${pkgs.git}/bin:/run/current-system/sw/bin:$PATH"
     export NPM_CONFIG_PREFIX="/home/claude/.npm-global"
     export HOME="/home/claude"
+    export CLAUDE_OS_STATE="$STATE_DIR"
 
     log() {
-      echo "[$(date -Iseconds)] $*" >> "$LOG"
-      echo "[$(date -Iseconds)] $*"
+      echo "[$(date -Iseconds)] [master] $*" | tee -a "$LOG"
     }
 
-    # Ensure directories exist
-    mkdir -p "$INBOX" "$AGENTS_DIR/outbox" "$STATE_DIR/awareness"
+    # --- Initialize master state ---
+    mkdir -p "$MASTER_DIR" "$GENOME_DIR" "$STATE_DIR/agents/inbox" \
+             "$STATE_DIR/agents/outbox" "$STATE_DIR/evolution" \
+             "$STATE_DIR/goals" "$STATE_DIR/awareness" \
+             "$STATE_DIR/skills" "$STATE_DIR/events"
 
-    # Write master agent PID for discovery
-    echo $$ > "$AGENTS_DIR/master.pid"
+    echo $$ > "$MASTER_DIR/pid"
 
     # Initialize agent registry
-    if [ ! -f "$AGENTS_DIR/registry.json" ]; then
-      echo '{"agents":[],"version":1}' > "$AGENTS_DIR/registry.json"
+    if [ ! -f "$STATE_DIR/agents/registry.json" ]; then
+      echo '{"agents":[],"version":1}' > "$STATE_DIR/agents/registry.json"
     fi
 
-    log "Master agent starting (PID $$)"
+    # Initialize evolution log
+    if [ ! -f "$STATE_DIR/evolution/log.json" ]; then
+      echo '{"mutations":[],"generation":0,"born":"'"$(date -Iseconds)"'","version":1}' \
+        > "$STATE_DIR/evolution/log.json"
+    fi
 
-    # --- System context gathering ---
+    # Initialize genome (the system's current capability manifest)
+    if [ ! -f "$GENOME_DIR/manifest.json" ]; then
+      ${pkgs.jq}/bin/jq -n \
+        --arg born "$(date -Iseconds)" \
+        '{version:1,generation:0,born:$born,packages:{base:["coreutils","curl","wget","git","jq","sqlite","htop","tmux","ripgrep","fd","nodejs_22","vim","socat","inotify-tools"],user:[]},services:{base:["sshd","networkmanager","claude-os-master","claude-os-bootstrap"],user:[]},skills:[],capabilities:["shell","networking","ssh","file-management","version-control","text-editing","json-processing"],fitness:{tasks_completed:0,packages_installed:0,skills_learned:0,errors_recovered:0,uptime_hours:0}}' \
+        > "$GENOME_DIR/manifest.json"
+    fi
+
+    # --- Write the master CLAUDE.md ---
+    cat > "$MASTER_DIR/CLAUDE.md" << 'CLAUDE_MD'
+${claudeMdMaster}
+CLAUDE_MD
+
+    # --- System context snapshot ---
     gather_context() {
-      local ctx="$STATE_DIR/awareness/system-status.json"
-      {
-        echo "{"
-        echo "  \"timestamp\": \"$(date -Iseconds)\","
-        echo "  \"uptime\": \"$(uptime -p 2>/dev/null || uptime)\","
-        echo "  \"load\": \"$(cat /proc/loadavg 2>/dev/null || echo unknown)\","
-        echo "  \"memory\": {"
-        if [ -f /proc/meminfo ]; then
-          local total=$(grep MemTotal /proc/meminfo | awk '{print $2}')
-          local avail=$(grep MemAvailable /proc/meminfo | awk '{print $2}')
-          echo "    \"total_kb\": $total,"
-          echo "    \"available_kb\": $avail"
-        else
-          echo "    \"total_kb\": 0, \"available_kb\": 0"
-        fi
-        echo "  },"
-        echo "  \"disk_usage\": \"$(df -h / 2>/dev/null | tail -1 | awk '{print $5}')\","
-        echo "  \"active_agents\": $(cat "$AGENTS_DIR/registry.json" 2>/dev/null | ${pkgs.jq}/bin/jq '.agents | length' 2>/dev/null || echo 0)"
-        echo "}"
-      } > "$ctx"
+      cat > "$STATE_DIR/awareness/system-status.json" << CTXEOF
+{
+  "timestamp": "$(date -Iseconds)",
+  "uptime": "$(uptime -p 2>/dev/null || uptime)",
+  "load": "$(cat /proc/loadavg 2>/dev/null || echo unknown)",
+  "memory": {
+    "total_kb": $(grep MemTotal /proc/meminfo 2>/dev/null | awk '{print $2}' || echo 0),
+    "available_kb": $(grep MemAvailable /proc/meminfo 2>/dev/null | awk '{print $2}' || echo 0)
+  },
+  "disk_usage": "$(df -h / 2>/dev/null | tail -1 | awk '{print $5}')",
+  "active_agents": $(${pkgs.jq}/bin/jq '.agents | length' "$STATE_DIR/agents/registry.json" 2>/dev/null || echo 0),
+  "generation": $(${pkgs.jq}/bin/jq '.generation' "$STATE_DIR/evolution/log.json" 2>/dev/null || echo 0),
+  "capabilities": $(${pkgs.jq}/bin/jq '.capabilities | length' "$GENOME_DIR/manifest.json" 2>/dev/null || echo 0),
+  "skills_count": $(${pkgs.jq}/bin/jq '.skills | length' "$GENOME_DIR/manifest.json" 2>/dev/null || echo 0)
+}
+CTXEOF
     }
 
-    # --- Process inbox messages ---
+    # --- Process inbox ---
     process_inbox() {
-      for msg_file in "$INBOX"/*.json; do
+      for msg_file in "$STATE_DIR/agents/inbox"/*.json; do
         [ -f "$msg_file" ] || continue
 
         local msg_type=$(${pkgs.jq}/bin/jq -r '.type // "unknown"' "$msg_file" 2>/dev/null)
-        log "Processing message: $msg_type from $msg_file"
+        log "Processing: $msg_type ($(basename "$msg_file"))"
 
         case "$msg_type" in
           shell-login)
-            local pid=$(${pkgs.jq}/bin/jq -r '.pid' "$msg_file" 2>/dev/null)
-            local user=$(${pkgs.jq}/bin/jq -r '.user' "$msg_file" 2>/dev/null)
-            local ts=$(${pkgs.jq}/bin/jq -r '.timestamp' "$msg_file" 2>/dev/null)
-            log "Shell agent login: user=$user pid=$pid"
-
-            # Register the agent
-            local registry="$AGENTS_DIR/registry.json"
+            local pid=$(${pkgs.jq}/bin/jq -r '.pid' "$msg_file")
+            local user=$(${pkgs.jq}/bin/jq -r '.user' "$msg_file")
+            # Register agent
             local tmp=$(mktemp)
-            ${pkgs.jq}/bin/jq --arg pid "$pid" --arg user "$user" --arg ts "$ts" \
+            ${pkgs.jq}/bin/jq --arg pid "$pid" --arg user "$user" --arg ts "$(date -Iseconds)" \
               '.agents += [{"type":"shell","pid":($pid|tonumber),"user":$user,"started":$ts,"status":"active"}]' \
-              "$registry" > "$tmp" && mv "$tmp" "$registry"
-
-            # Create outbox for this agent
-            mkdir -p "$AGENTS_DIR/outbox/shell-$pid"
-
-            # Send welcome context to the shell agent
-            gather_context
-            local status=$(cat "$STATE_DIR/awareness/system-status.json" 2>/dev/null)
-            cat > "$AGENTS_DIR/outbox/shell-$pid/welcome.json" << ENDMSG
-{
-  "type": "welcome",
-  "from": "master",
-  "timestamp": "$(date -Iseconds)",
-  "system_status": $status,
-  "message": "Shell agent registered. System is healthy."
-}
-ENDMSG
+              "$STATE_DIR/agents/registry.json" > "$tmp" && mv "$tmp" "$STATE_DIR/agents/registry.json"
+            mkdir -p "$STATE_DIR/agents/outbox/shell-$pid"
+            log "Shell agent registered: pid=$pid user=$user"
             ;;
-
           shell-logout)
-            local pid=$(${pkgs.jq}/bin/jq -r '.pid' "$msg_file" 2>/dev/null)
-            log "Shell agent logout: pid=$pid"
-
-            # Remove from registry
-            local registry="$AGENTS_DIR/registry.json"
+            local pid=$(${pkgs.jq}/bin/jq -r '.pid' "$msg_file")
             local tmp=$(mktemp)
             ${pkgs.jq}/bin/jq --arg pid "$pid" \
               '.agents = [.agents[] | select(.pid != ($pid|tonumber))]' \
-              "$registry" > "$tmp" && mv "$tmp" "$registry"
-
-            # Clean up outbox
-            rm -rf "$AGENTS_DIR/outbox/shell-$pid"
+              "$STATE_DIR/agents/registry.json" > "$tmp" && mv "$tmp" "$STATE_DIR/agents/registry.json"
+            rm -rf "$STATE_DIR/agents/outbox/shell-$pid"
+            log "Shell agent deregistered: pid=$pid"
             ;;
-
-          capability-request)
-            local package=$(${pkgs.jq}/bin/jq -r '.package' "$msg_file" 2>/dev/null)
-            local from_pid=$(${pkgs.jq}/bin/jq -r '.from_pid' "$msg_file" 2>/dev/null)
-            log "Capability request: package=$package from pid=$from_pid"
-            # Phase 4 will implement the actual capability manager
+          goal)
+            # A user has set a goal — queue it for the planner
+            cp "$msg_file" "$STATE_DIR/goals/$(basename "$msg_file")"
+            log "Goal queued: $(${pkgs.jq}/bin/jq -r '.description // .goal // "unknown"' "$msg_file")"
             ;;
-
-          *)
-            log "Unknown message type: $msg_type"
+          evolve)
+            # Trigger evolution — the Claude session will handle this
+            log "Evolution trigger received"
             ;;
         esac
 
-        # Archive processed message
         mv "$msg_file" "$STATE_DIR/events/$(basename "$msg_file")" 2>/dev/null || rm "$msg_file"
       done
     }
 
-    # --- Monitor system health ---
+    # --- Health monitoring ---
     check_health() {
-      # Check for failed systemd services
       local failed=$(systemctl --failed --no-legend 2>/dev/null | wc -l)
       if [ "$failed" -gt 0 ]; then
-        log "WARNING: $failed failed systemd services detected"
+        log "WARNING: $failed failed services"
+        systemctl --failed --no-legend >> "$LOG" 2>/dev/null
       fi
-
-      # Update system context
       gather_context
     }
 
-    # --- Main loop ---
-    log "Master agent entering main loop"
+    # --- Main orchestration loop ---
+    log "Master agent starting (generation $(${pkgs.jq}/bin/jq '.generation' "$STATE_DIR/evolution/log.json" 2>/dev/null || echo 0))"
+    gather_context
 
     CYCLE=0
     while true; do
       CYCLE=$((CYCLE + 1))
 
-      # Process any pending messages
       process_inbox
 
-      # Health check every 6 cycles (30 seconds)
+      # Health check every 6 cycles (30s)
       if [ $((CYCLE % 6)) -eq 0 ]; then
         check_health
       fi
 
-      # Context refresh every 12 cycles (60 seconds)
+      # Process queued goals every 4 cycles (20s)
+      if [ $((CYCLE % 4)) -eq 0 ]; then
+        for goal_file in "$STATE_DIR/goals"/*.json; do
+          [ -f "$goal_file" ] || continue
+          log "Processing goal: $(basename "$goal_file")"
+          # Move to active goals — Claude (via shell or future planner) picks these up
+          mkdir -p "$STATE_DIR/goals/active"
+          mv "$goal_file" "$STATE_DIR/goals/active/" 2>/dev/null || true
+        done
+      fi
+
+      # Prune dead agents every 12 cycles (60s)
       if [ $((CYCLE % 12)) -eq 0 ]; then
-        gather_context
-        log "Context refreshed (cycle $CYCLE)"
+        local tmp=$(mktemp)
+        local alive="[]"
+        for agent_pid in $(${pkgs.jq}/bin/jq -r '.agents[].pid' "$STATE_DIR/agents/registry.json" 2>/dev/null); do
+          if kill -0 "$agent_pid" 2>/dev/null; then
+            alive=$(echo "$alive" | ${pkgs.jq}/bin/jq ". + [$agent_pid]")
+          fi
+        done
+        ${pkgs.jq}/bin/jq --argjson alive "$alive" \
+          '[.agents[] | select(.pid | IN($alive[]))] as $live | .agents = $live' \
+          "$STATE_DIR/agents/registry.json" > "$tmp" 2>/dev/null && mv "$tmp" "$STATE_DIR/agents/registry.json"
       fi
 
       sleep 5
@@ -168,7 +182,12 @@ ENDMSG
 
 in
 {
-  environment.systemPackages = [ masterAgent ];
+  environment.systemPackages = [
+    masterAgent
+    evolutionEngine
+    capabilityManager
+    goalPlanner
+  ];
 
   # Master agent systemd service
   systemd.services.claude-os-master = {
@@ -177,7 +196,6 @@ in
     after = [
       "network-online.target"
       "claude-os-bootstrap.service"
-      "claude-code-install.service"
     ];
     wants = [ "network-online.target" ];
     requires = [ "claude-os-bootstrap.service" ];
@@ -189,27 +207,15 @@ in
       Restart = "always";
       RestartSec = 5;
       ExecStart = "${masterAgent}/bin/claude-os-master";
-      Environment = [
-        "HOME=/home/claude"
-        "PATH=/home/claude/.npm-global/bin:${pkgs.nodejs_22}/bin:${pkgs.jq}/bin:${pkgs.coreutils}/bin:${pkgs.procps}/bin:${pkgs.systemd}/bin:${pkgs.bash}/bin:/run/current-system/sw/bin"
-      ];
-
-      # Logging
       StandardOutput = "journal";
       StandardError = "journal";
 
-      # Hardening
-      ProtectSystem = "strict";
-      ReadWritePaths = [
-        "/var/lib/claude-os"
-        "/var/log"
-        "/home/claude"
-      ];
-      PrivateTmp = true;
+      # Allow system modifications for evolution
+      ProtectSystem = "no";
     };
   };
 
-  # Write the master agent's CLAUDE.md to state dir on boot
+  # Write the master agent's CLAUDE.md to state dir
   systemd.services.claude-os-master-config = {
     description = "Generate Master Agent Configuration";
     wantedBy = [ "multi-user.target" ];
@@ -222,8 +228,8 @@ in
       Group = "users";
     };
     script = ''
-      mkdir -p /var/lib/claude-os/agents
-      cat > /var/lib/claude-os/agents/master-claude.md << 'MASTERMD'
+      mkdir -p /var/lib/claude-os/agents/master
+      cat > /var/lib/claude-os/agents/master/CLAUDE.md << 'MASTERMD'
 ${claudeMdMaster}
 MASTERMD
     '';
