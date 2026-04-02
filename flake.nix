@@ -42,9 +42,11 @@
             # Phase 5: Memory graph
             ./modules/memory
 
+            # Awareness layer
+            ./modules/awareness
+
             # Phase 3+:
             # ./modules/gpu
-            # ./modules/awareness
           ]
           # GPU module only for x86_64 (NVIDIA/CUDA)
           ++ nixpkgs.lib.optionals enableGpu [

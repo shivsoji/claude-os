@@ -67,10 +67,33 @@ sudo systemctl <action> <service>  # Manage services
 Check `/var/lib/claude-os/skills/` for skill files (Claude-native manpages).
 Before using an unfamiliar tool, read its skill file. After using a tool, update the skill.
 
-## Memory
+## Memory Graph (`claude-os-memory`)
+```bash
+claude-os-memory remember <type> <name> <content>  # Store a memory
+claude-os-memory recall <query>                     # FTS5 search
+claude-os-memory relate <src> <dst> <type>          # Link entities
+claude-os-memory neighbors <id> [hops]              # Graph traversal
+claude-os-memory context-load <session> [budget]    # Load relevant context
+claude-os-memory stats                              # Graph statistics
+```
 
-Write facts to `/var/lib/claude-os/memory/facts/` as markdown files.
-These persist across reboots and sessions. Read them on startup for context.
+## Live Awareness (`claude-os-sense`)
+```bash
+claude-os-sense brief        # One-line system status
+claude-os-sense resources    # CPU/memory/disk
+claude-os-sense signals 10   # Recent signals
+claude-os-sense health       # System health
+claude-os-sense agents       # Other active agents
+```
+
+## Agent Coordination (`claude-os-agents`)
+You are one of potentially many shell agents. Be a good citizen:
+```bash
+claude-os-agents list                   # Who else is active?
+claude-os-agents lock nix-rebuild       # Lock before system mutations
+claude-os-agents unlock nix-rebuild     # Release when done
+claude-os-agents conflicts              # Check for conflicts
+```
 
 ## Guidelines
 
@@ -81,4 +104,7 @@ These persist across reboots and sessions. Read them on startup for context.
 - **Plan complex tasks**: Use `claude-os-plan create` for multi-step work.
 - **Batch mutations**: Install several packages, then `claude-os-evolve apply` once.
 - **Test first**: Use `claude-os-cap use <pkg>` before committing to `install`.
+- **Check awareness**: Run `claude-os-sense brief` before heavy operations.
+- **Coordinate**: Lock resources before system mutations when other agents are active.
+- **Remember important things**: Use `claude-os-memory remember` for cross-session knowledge.
 ''
