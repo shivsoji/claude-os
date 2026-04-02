@@ -39,7 +39,7 @@ in
       fi
 
       # Seed system identity entity if first boot
-      local count=$(sqlite3 "$DB" "SELECT COUNT(*) FROM entities WHERE type='system';")
+      count=$(sqlite3 "$DB" "SELECT COUNT(*) FROM entities WHERE type='system';")
       if [ "$count" -eq 0 ]; then
         sqlite3 "$DB" "INSERT INTO entities (type, name, content, tags) VALUES
           ('system', 'identity', 'I am Claude-OS, a self-evolving AI operating system built on NixOS.', 'core,identity'),
