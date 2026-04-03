@@ -1,0 +1,81 @@
+name: Build & Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  check:
+    name: Flake Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: DeterminateSystems/nix-installer-action@main
+
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+
+      - name: Check flake
+        run: nix flake check --all-systems --no-build
+
+  shellcheck:
+    name: Shell Script Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install shellcheck
+        run: sudo apt-get install -y shellcheck
+
+      - name: Lint all shell scripts
+        run: |
+          find modules/ -name '*.sh' -exec shellcheck -S warning -e SC2034,SC2155,SC2086 {} +
+
+  build-vm-x86:
+    name: Build VM (x86_64)
+    runs-on: ubuntu-latest
+    needs: check
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: DeterminateSystems/nix-installer-action@main
+        with:
+          extra-conf: |
+            extra-platforms = aarch64-linux
+            extra-substituters = https://cuda-maintainers.cachix.org
+            extra-trusted-public-keys = cuda-maintainers.cachix.org-1:0dq3bujKpuEPMCX6U4WylrUDZ9JyUG0VpVZa7CNfq5E=
+
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+
+      - name: Build x86_64 VM
+        run: nix build .#packages.x86_64-linux.vm -L
+
+      - name: Upload VM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: claude-os-vm-x86_64
+          path: result/
+          retention-days: 7
+
+  build-vm-arm:
+    name: Build VM (aarch64)
+    runs-on: ubuntu-24.04-arm
+    needs: check
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: DeterminateSystems/nix-installer-action@main
+
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+
+      - name: Build aarch64 VM
+        run: nix build .#packages.aarch64-linux.vm -L
+
+      - name: Upload VM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: claude-os-vm-aarch64
+          path: result/
+          retention-days: 7
