@@ -35,6 +35,16 @@ log_mutation() {
   local gen=$(jq '.generation' "$EVOLUTION_LOG" 2>/dev/null || echo 0)
   local mutation_id="gen${gen}-$(date +%s)-$(head -c4 /dev/urandom | od -An -tx1 | tr -d ' ')"
 
+  # Validate details is valid JSON, fall back to wrapping as string
+  if ! echo "$details" | jq . >/dev/null 2>&1; then
+    details="{\"raw\":$(echo "$details" | jq -R .)}"
+  fi
+
+  # Ensure evolution log exists and is valid
+  if [ ! -f "$EVOLUTION_LOG" ] || ! jq . "$EVOLUTION_LOG" >/dev/null 2>&1; then
+    echo '{"mutations":[],"generation":0,"born":"'"$(timestamp)"'","version":1}' > "$EVOLUTION_LOG"
+  fi
+
   local tmp=$(mktemp)
   jq --arg id "$mutation_id" --arg type "$type" --arg desc "$description" \
      --arg ts "$(timestamp)" --argjson details "$details" \
@@ -198,20 +208,26 @@ EOF
     ;;
 
   status)
+    if [ ! -f "$GENOME" ]; then
+      echo "Genome not initialized yet. Waiting for master agent."
+      exit 0
+    fi
     echo "=== Claude-OS Genome ==="
-    echo "Generation: $(jq '.generation' "$GENOME" 2>/dev/null || echo 0)"
-    echo "Born: $(jq -r '.born' "$GENOME" 2>/dev/null || echo unknown)"
+    echo "Generation: $(jq '.generation // 0' "$GENOME" 2>/dev/null)"
+    echo "Born: $(jq -r '.born // "unknown"' "$GENOME" 2>/dev/null)"
     echo ""
-    echo "Packages (base): $(jq '.packages.base | length' "$GENOME" 2>/dev/null || echo 0)"
-    echo "Packages (user): $(jq '.packages.user | length' "$GENOME" 2>/dev/null || echo 0)"
-    if [ "$(jq '.packages.user | length' "$GENOME" 2>/dev/null)" -gt 0 ]; then
+    echo "Packages (base): $(jq '.packages.base | length' "$GENOME" 2>/dev/null)"
+    echo "Packages (user): $(jq '.packages.user | length' "$GENOME" 2>/dev/null)"
+    user_pkg_count=$(jq '.packages.user | length' "$GENOME" 2>/dev/null || echo 0)
+    if [ "${user_pkg_count:-0}" -gt 0 ]; then
       echo "  User packages: $(jq -r '.packages.user | join(", ")' "$GENOME" 2>/dev/null)"
     fi
     echo ""
     echo "Capabilities: $(jq -r '.capabilities | join(", ")' "$GENOME" 2>/dev/null)"
     echo ""
-    echo "Skills: $(jq '.skills | length' "$GENOME" 2>/dev/null || echo 0)"
-    if [ "$(jq '.skills | length' "$GENOME" 2>/dev/null)" -gt 0 ]; then
+    echo "Skills: $(jq '.skills | length' "$GENOME" 2>/dev/null)"
+    skill_count=$(jq '.skills | length' "$GENOME" 2>/dev/null || echo 0)
+    if [ "${skill_count:-0}" -gt 0 ]; then
       echo "  $(jq -r '.skills | join(", ")' "$GENOME" 2>/dev/null)"
     fi
     echo ""

@@ -28,7 +28,7 @@ if [ ! -f "$DB" ]; then
   exit 1
 fi
 
-# Helper: run SQL and return results
+# Helper: run SQL and return JSON results
 sql() {
   sqlite3 -json "$DB" "$1" 2>/dev/null
 }
@@ -37,16 +37,14 @@ sql_plain() {
   sqlite3 "$DB" "$1" 2>/dev/null
 }
 
-# Helper: touch entity (update access time and count)
-touch_entity() {
-  local id="$1"
-  sql_plain "UPDATE entities SET last_accessed = datetime('now'), access_count = access_count + 1, decay_score = MIN(1.0, decay_score + 0.1) WHERE id = $id;"
+# Helper: safely escape a string for SQL (prevent injection)
+sql_escape() {
+  printf '%s' "$1" | sed "s/'/''/g"
 }
 
-# Helper: estimate token count (rough: 1 token ≈ 4 chars)
-estimate_tokens() {
-  local text="$1"
-  echo $(( ${#text} / 4 ))
+# Helper: touch entity (update access time and count)
+touch_entity() {
+  sql_plain "UPDATE entities SET last_accessed = datetime('now'), access_count = access_count + 1, decay_score = MIN(1.0, decay_score + 0.1) WHERE id = $1;"
 }
 
 case "${1:-help}" in
@@ -66,7 +64,8 @@ case "${1:-help}" in
       esac
     done
 
-    id=$(sql_plain "INSERT INTO entities (type, name, content, tags, session_id) VALUES ('$type', '$(echo "$name" | sed "s/'/''/g")', '$(echo "$content" | sed "s/'/''/g")', '$tags', '$session_id') RETURNING id;")
+    # All values properly escaped
+    id=$(sql_plain "INSERT INTO entities (type, name, content, tags, session_id) VALUES ('$(sql_escape "$type")', '$(sql_escape "$name")', '$(sql_escape "$content")', '$(sql_escape "$tags")', '$(sql_escape "$session_id")') RETURNING id;")
     echo "Remembered: entity #$id ($type: $name)"
     echo "$id"
     ;;
@@ -74,6 +73,7 @@ case "${1:-help}" in
   recall)
     shift
     query="${*:?Usage: claude-os-memory recall <query>}"
+    escaped_query=$(sql_escape "$query")
     # FTS5 search with relevance scoring
     results=$(sql "
       SELECT e.id, e.type, e.name, substr(e.content, 1, 200) as content_preview,
@@ -81,20 +81,20 @@ case "${1:-help}" in
              round(rank, 4) as fts_rank
       FROM entities_fts fts
       JOIN entities e ON e.id = fts.rowid
-      WHERE entities_fts MATCH '$(echo "$query" | sed "s/'/''/g")'
+      WHERE entities_fts MATCH '$escaped_query'
       ORDER BY (e.decay_score * -rank * (1 + ln(1 + e.access_count))) DESC
       LIMIT 20;
     ")
 
     # Touch accessed entities
-    for id in $(echo "$results" | sqlite3 :memory: "SELECT json_extract(value, '$.id') FROM json_each('$results');" 2>/dev/null); do
-      touch_entity "$id"
+    echo "$results" | jq -r '.[].id' 2>/dev/null | while read -r eid; do
+      [ -n "$eid" ] && touch_entity "$eid"
     done
 
     if [ -z "$results" ] || [ "$results" = "[]" ]; then
       echo "No memories found for: $query"
     else
-      echo "$results" | python3 -m json.tool 2>/dev/null || echo "$results"
+      echo "$results" | jq '.' 2>/dev/null || echo "$results"
     fi
     ;;
 
@@ -116,7 +116,7 @@ case "${1:-help}" in
     dst="${3:?Missing dst_id}"
     rel_type="${4:?Missing rel_type}"
     weight="${5:-1.0}"
-    sql_plain "INSERT OR REPLACE INTO relations (src_id, dst_id, rel_type, weight) VALUES ($src, $dst, '$rel_type', $weight);"
+    sql_plain "INSERT OR REPLACE INTO relations (src_id, dst_id, rel_type, weight) VALUES ($src, $dst, '$(sql_escape "$rel_type")', $weight);"
     echo "Related: #$src --[$rel_type ($weight)]--> #$dst"
     ;;
 
@@ -125,7 +125,6 @@ case "${1:-help}" in
     hops="${3:-1}"
 
     if [ "$hops" -eq 1 ]; then
-      # Direct neighbors
       sql "
         SELECT e.id, e.type, e.name, r.rel_type, r.weight,
                substr(e.content, 1, 150) as content_preview
@@ -135,13 +134,10 @@ case "${1:-help}" in
         ORDER BY r.weight DESC;
       "
     else
-      # Multi-hop traversal via recursive CTE
       sql "
         WITH RECURSIVE traverse(entity_id, depth, path) AS (
-          -- Start node
           SELECT $id, 0, CAST($id AS TEXT)
           UNION ALL
-          -- Expand neighbors
           SELECT
             CASE WHEN r.src_id = t.entity_id THEN r.dst_id ELSE r.src_id END,
             t.depth + 1,
@@ -164,31 +160,16 @@ case "${1:-help}" in
 
   context-load)
     session_id="${2:?Usage: claude-os-memory context-load <session_id> [token_budget]}"
-    budget="${3:-4000}"  # Default 4000 tokens (~16K chars)
+    budget="${3:-4000}"
 
-    # Build context from most relevant entities that fit in budget
-    # Relevance = decay * log(access_count) * recency * connection_density
     echo "Loading context for session $session_id (budget: $budget tokens)..."
 
-    result=$(sql_plain "
-      SELECT id, type, name, content, tags,
-             CAST((decay_score *
-               (1.0 + ln(1 + access_count)) *
-               (1.0 / (1.0 + (julianday('now') - julianday(last_accessed)))) *
-               (1.0 + (SELECT COUNT(*) FROM relations WHERE src_id = entities.id OR dst_id = entities.id) * 0.1)
-             ) AS REAL) as relevance,
-             length(content) / 4 as est_tokens
-      FROM entities
-      WHERE decay_score > 0.05
-      ORDER BY relevance DESC;
-    ")
-
     # Greedily pack entities into budget
+    # Use process substitution to keep variables in scope
     total_tokens=0
-    context_text=""
     loaded=0
 
-    echo "$result" | while IFS='|' read -r id type name content tags relevance est_tokens; do
+    while IFS='|' read -r id type name content tags relevance est_tokens; do
       [ -z "$id" ] && continue
       new_total=$((total_tokens + est_tokens))
       if [ "$new_total" -le "$budget" ]; then
@@ -203,11 +184,10 @@ case "${1:-help}" in
           fi
         fi
 
-        # Add to context window tracking
+        # Track in context window
         sql_plain "INSERT OR REPLACE INTO context_windows (session_id, entity_id, relevance, token_cost)
-                   VALUES ('$session_id', $id, $relevance, $est_tokens);"
+                   VALUES ('$(sql_escape "$session_id")', $id, $relevance, $est_tokens);"
 
-        # Touch the entity
         touch_entity "$id"
 
         # Output as structured context
@@ -215,7 +195,18 @@ case "${1:-help}" in
         echo "$content"
         echo ""
       fi
-    done
+    done < <(sql_plain "
+      SELECT id, type, name, content, tags,
+             CAST((decay_score *
+               (1.0 + ln(1 + access_count)) *
+               (1.0 / (1.0 + (julianday('now') - julianday(last_accessed)))) *
+               (1.0 + (SELECT COUNT(*) FROM relations WHERE src_id = entities.id OR dst_id = entities.id) * 0.1)
+             ) AS REAL) as relevance,
+             length(content) / 4 as est_tokens
+      FROM entities
+      WHERE decay_score > 0.05
+      ORDER BY relevance DESC;
+    ")
 
     echo "---"
     echo "Context loaded: $loaded entities, ~$total_tokens tokens"
@@ -225,20 +216,13 @@ case "${1:-help}" in
     shift
     query="${1:?Usage: claude-os-memory context-for <query> [token_budget]}"
     budget="${2:-4000}"
+    escaped_query=$(sql_escape "$query")
 
     echo "# Relevant Memory Context"
     echo ""
 
     # FTS search + graph expansion
-    sql_plain "
-      -- First: FTS matches
-      SELECT e.id, e.type, e.name, e.content
-      FROM entities_fts fts
-      JOIN entities e ON e.id = fts.rowid
-      WHERE entities_fts MATCH '$(echo "$query" | sed "s/'/''/g")'
-      ORDER BY (e.decay_score * -rank * (1 + ln(1 + e.access_count))) DESC
-      LIMIT 10;
-    " | while IFS='|' read -r id type name content; do
+    while IFS='|' read -r id type name content; do
       [ -z "$id" ] && continue
       touch_entity "$id"
       echo "## [$type] $name"
@@ -246,32 +230,37 @@ case "${1:-help}" in
       echo ""
 
       # Also show direct neighbors of each match
-      sql_plain "
+      while IFS='|' read -r nid ntype nname ncontent nrel; do
+        [ -z "$nid" ] && continue
+        echo "  -> [$nrel] [$ntype] $nname: $ncontent"
+      done < <(sql_plain "
         SELECT e.id, e.type, e.name, substr(e.content, 1, 200), r.rel_type
         FROM relations r
         JOIN entities e ON (e.id = r.dst_id OR e.id = r.src_id)
         WHERE (r.src_id = $id OR r.dst_id = $id) AND e.id != $id
         ORDER BY r.weight DESC LIMIT 3;
-      " | while IFS='|' read -r nid ntype nname ncontent nrel; do
-        [ -z "$nid" ] && continue
-        echo "  -> [$nrel] [$ntype] $nname: $ncontent"
-      done
+      ")
       echo ""
-    done
+    done < <(sql_plain "
+      SELECT e.id, e.type, e.name, e.content
+      FROM entities_fts fts
+      JOIN entities e ON e.id = fts.rowid
+      WHERE entities_fts MATCH '$escaped_query'
+      ORDER BY (e.decay_score * -rank * (1 + ln(1 + e.access_count))) DESC
+      LIMIT 10;
+    ")
     ;;
 
   summarize)
     id="${2:?Usage: claude-os-memory summarize <id>}"
-    # Check for existing summary
     existing=$(sql_plain "SELECT summary FROM summaries WHERE entity_id = $id AND level = 1;")
     if [ -n "$existing" ]; then
       echo "$existing"
     else
-      # Create a basic summary (truncation — real summarization would use Claude)
       content=$(sql_plain "SELECT content FROM entities WHERE id = $id;")
       if [ ${#content} -gt 200 ]; then
         summary="${content:0:200}..."
-        sql_plain "INSERT INTO summaries (entity_id, level, summary) VALUES ($id, 1, '$(echo "$summary" | sed "s/'/''/g")');"
+        sql_plain "INSERT INTO summaries (entity_id, level, summary) VALUES ($id, 1, '$(sql_escape "$summary")');"
         echo "$summary"
       else
         echo "$content"
@@ -287,23 +276,24 @@ case "${1:-help}" in
     echo "Sessions: $(sql_plain 'SELECT COUNT(*) FROM sessions;')"
     echo ""
     echo "By type:"
-    sql_plain "SELECT type, COUNT(*) as count FROM entities GROUP BY type ORDER BY count DESC;" | \
-      while IFS='|' read -r type count; do echo "  $type: $count"; done
+    while IFS='|' read -r type count; do
+      [ -n "$type" ] && echo "  $type: $count"
+    done < <(sql_plain "SELECT type, COUNT(*) as count FROM entities GROUP BY type ORDER BY count DESC;")
     echo ""
     echo "By relation:"
-    sql_plain "SELECT rel_type, COUNT(*) as count FROM relations GROUP BY rel_type ORDER BY count DESC;" | \
-      while IFS='|' read -r rel count; do echo "  $rel: $count"; done
+    while IFS='|' read -r rel count; do
+      [ -n "$rel" ] && echo "  $rel: $count"
+    done < <(sql_plain "SELECT rel_type, COUNT(*) as count FROM relations GROUP BY rel_type ORDER BY count DESC;")
     echo ""
     echo "Avg decay score: $(sql_plain 'SELECT round(avg(decay_score), 3) FROM entities;')"
-    echo "Total accesses: $(sql_plain 'SELECT SUM(access_count) FROM entities;')"
+    echo "Total accesses: $(sql_plain 'SELECT COALESCE(SUM(access_count),0) FROM entities;')"
     echo "DB size: $(du -h "$DB" 2>/dev/null | cut -f1)"
     ;;
 
   types)
-    sql_plain "SELECT DISTINCT type FROM entities ORDER BY type;" | while read -r t; do
-      count=$(sql_plain "SELECT COUNT(*) FROM entities WHERE type = '$t';")
-      echo "  $t ($count)"
-    done
+    while IFS='|' read -r t count; do
+      [ -n "$t" ] && echo "  $t ($count)"
+    done < <(sql_plain "SELECT type, COUNT(*) FROM entities GROUP BY type ORDER BY type;")
     ;;
 
   recent)
@@ -318,15 +308,15 @@ case "${1:-help}" in
     sql_plain "
       UPDATE entities SET
         decay_score = CASE
-          WHEN type IN ('system', 'core', 'user_pref') THEN decay_score  -- protected
-          WHEN last_accessed > datetime('now', '-1 hour') THEN MIN(1.0, decay_score + 0.05)  -- boost recent
+          WHEN type IN ('system', 'core', 'user_pref') THEN decay_score
+          WHEN last_accessed > datetime('now', '-1 hour') THEN MIN(1.0, decay_score + 0.05)
           WHEN last_accessed > datetime('now', '-1 day') THEN decay_score * 0.98
           WHEN last_accessed > datetime('now', '-7 days') THEN decay_score * 0.95
           ELSE decay_score * 0.90
         END;
     "
     forgotten=$(sql_plain "SELECT COUNT(*) FROM entities WHERE decay_score < 0.01 AND type NOT IN ('system','core','user_pref');")
-    echo "Decay applied. $forgotten entities below forget threshold."
+    echo "Decay applied. ${forgotten:-0} entities below forget threshold."
     ;;
 
   export)

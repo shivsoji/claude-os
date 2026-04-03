@@ -37,28 +37,34 @@ case "${1:-help}" in
     current_pkgs=$(jq -r '(.packages.base + .packages.user) | join(", ")' "$GENOME" 2>/dev/null || echo "")
     current_skills=$(jq -r '.skills | join(", ")' "$GENOME" 2>/dev/null || echo "none")
 
-    cat > "$PLANS_DIR/$id.json" << EOF
-{
-  "id": "$id",
-  "goal": "$goal",
-  "status": "pending",
-  "created": "$(date -Iseconds)",
-  "context": {
-    "capabilities_at_creation": "$current_caps",
-    "packages_at_creation": "$current_pkgs",
-    "skills_at_creation": "$current_skills"
-  },
-  "analysis": {
-    "missing_capabilities": [],
-    "required_packages": [],
-    "required_skills": [],
-    "estimated_steps": 0,
-    "notes": "Awaiting analysis by Claude. Run: claude-os-plan capabilities '$goal'"
-  },
-  "steps": [],
-  "outcome": null
-}
-EOF
+    # Use jq to safely generate JSON (prevents injection from goal text)
+    jq -n \
+      --arg id "$id" \
+      --arg goal "$goal" \
+      --arg ts "$(date -Iseconds)" \
+      --arg caps "$current_caps" \
+      --arg pkgs "$current_pkgs" \
+      --arg skills "$current_skills" \
+      '{
+        id: $id,
+        goal: $goal,
+        status: "pending",
+        created: $ts,
+        context: {
+          capabilities_at_creation: $caps,
+          packages_at_creation: $pkgs,
+          skills_at_creation: $skills
+        },
+        analysis: {
+          missing_capabilities: [],
+          required_packages: [],
+          required_skills: [],
+          estimated_steps: 0,
+          notes: ("Awaiting analysis by Claude. Run: claude-os-plan capabilities " + $goal)
+        },
+        steps: [],
+        outcome: null
+      }' > "$PLANS_DIR/$id.json"
 
     echo "Plan created: $id"
     echo "Goal: $goal"
