@@ -16,23 +16,24 @@ jobs:
       - uses: actions/checkout@v4
 
       - uses: DeterminateSystems/nix-installer-action@main
-        with:
-          extra-conf: |
-            extra-substituters = https://cuda-maintainers.cachix.org
-            extra-trusted-public-keys = cuda-maintainers.cachix.org-1:0dq3bujKpuEPMCX6U4WylrUDZ9JyUG0VpVZa7CNfq5E=
 
       - uses: DeterminateSystems/magic-nix-cache-action@main
+        continue-on-error: true
 
       - name: Build x86_64 VM
         run: |
           nix build .#packages.x86_64-linux.vm -L
-          cp -rL result claude-os-vm-x86_64
-          tar czf claude-os-vm-x86_64.tar.gz claude-os-vm-x86_64/
+          # Archive the nix store path directly (avoids symlink/special file issues)
+          VM_PATH=$(nix build .#packages.x86_64-linux.vm --print-out-paths --no-link)
+          tar czf claude-os-vm-x86_64.tar.gz -C "$(dirname "$VM_PATH")" "$(basename "$VM_PATH")" \
+            --dereference --hard-dereference 2>/dev/null || \
+          tar czf claude-os-vm-x86_64.tar.gz -C "$VM_PATH" bin/
 
       - name: Build x86_64 ISO
         run: |
           nix build .#packages.x86_64-linux.iso -L
-          cp -L result/iso/*.iso claude-os-x86_64.iso
+          ISO_PATH=$(find "$(nix build .#packages.x86_64-linux.iso --print-out-paths --no-link)" -name '*.iso' | head -1)
+          cp "$ISO_PATH" claude-os-x86_64.iso
 
       - name: Upload x86_64 artifacts
         uses: actions/upload-artifact@v4
@@ -52,17 +53,21 @@ jobs:
       - uses: DeterminateSystems/nix-installer-action@main
 
       - uses: DeterminateSystems/magic-nix-cache-action@main
+        continue-on-error: true
 
       - name: Build aarch64 VM
         run: |
           nix build .#packages.aarch64-linux.vm -L
-          cp -rL result claude-os-vm-aarch64
-          tar czf claude-os-vm-aarch64.tar.gz claude-os-vm-aarch64/
+          VM_PATH=$(nix build .#packages.aarch64-linux.vm --print-out-paths --no-link)
+          tar czf claude-os-vm-aarch64.tar.gz -C "$(dirname "$VM_PATH")" "$(basename "$VM_PATH")" \
+            --dereference --hard-dereference 2>/dev/null || \
+          tar czf claude-os-vm-aarch64.tar.gz -C "$VM_PATH" bin/
 
       - name: Build aarch64 ISO
         run: |
           nix build .#packages.aarch64-linux.iso -L
-          cp -L result/iso/*.iso claude-os-aarch64.iso
+          ISO_PATH=$(find "$(nix build .#packages.aarch64-linux.iso --print-out-paths --no-link)" -name '*.iso' | head -1)
+          cp "$ISO_PATH" claude-os-aarch64.iso
 
       - name: Upload aarch64 artifacts
         uses: actions/upload-artifact@v4
@@ -111,39 +116,25 @@ jobs:
 
             | File | Description |
             |------|-------------|
-            | `claude-os-vm-x86_64.tar.gz` | QEMU VM image (Intel/AMD, NVIDIA/CUDA) |
+            | `claude-os-vm-x86_64.tar.gz` | QEMU VM image (Intel/AMD) |
             | `claude-os-vm-aarch64.tar.gz` | QEMU VM image (ARM64, Apple Silicon via OrbStack) |
             | `claude-os-x86_64.iso` | Bootable ISO installer (Intel/AMD) |
             | `claude-os-aarch64.iso` | Bootable ISO installer (ARM64) |
 
             ### Quick Start
 
-            **VM (recommended for first try):**
+            **VM:**
             ```bash
             tar xzf claude-os-vm-x86_64.tar.gz
-            cd claude-os-vm-x86_64
             ./bin/run-claude-os-vm
-            # SSH in from another terminal:
-            ssh -p 2222 claude@localhost  # password: claude-os
+            # SSH: ssh -p 2222 claude@localhost (password: claude-os)
             ```
 
-            **ISO (bare metal / VM hypervisor):**
+            **ISO:**
             ```bash
-            # Write to USB
             sudo dd if=claude-os-x86_64.iso of=/dev/sdX bs=4M status=progress
-            # Boot from USB, login as claude, run claude-os-install
             ```
 
-            ### What's Included
-
-            - Claude Code as login shell with full system access
-            - Master agent daemon (orchestration, awareness, self-healing)
-            - Evolution engine (genome-based self-mutation with rollback)
-            - SQLite memory graph (FTS5 search, decay, context windows)
-            - Ollama for local LLM inference (CUDA on x86_64)
-            - Health guardian (auto-restart, disk cleanup, process management)
-            - Multi-agent coordination (locking, conflict detection)
-
-            See [README](https://github.com/shivsoji/claude-os#readme) for full documentation.
+            See [README](https://github.com/shivsoji/claude-os#readme) for full docs.
           files: |
             artifacts/*
