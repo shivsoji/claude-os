@@ -32,8 +32,16 @@ jobs:
       - name: Build x86_64 ISO
         run: |
           nix build .#packages.x86_64-linux.iso -L
-          ISO_PATH=$(find "$(nix build .#packages.x86_64-linux.iso --print-out-paths --no-link)" -name '*.iso' | head -1)
-          cp "$ISO_PATH" claude-os-x86_64.iso
+          ISO_DIR=$(nix build .#packages.x86_64-linux.iso --print-out-paths --no-link)
+          ISO_FILE=$(find "$ISO_DIR" -name '*.iso' -type f | head -1)
+          if [ -n "$ISO_FILE" ]; then
+            cp "$ISO_FILE" claude-os-x86_64.iso
+          else
+            # ISO might be in a subdirectory
+            cp "$ISO_DIR"/iso/*.iso claude-os-x86_64.iso 2>/dev/null || \
+            cp -r "$ISO_DIR" claude-os-x86_64.iso
+          fi
+          ls -lh claude-os-x86_64.iso
 
       - name: Upload x86_64 artifacts
         uses: actions/upload-artifact@v4
@@ -66,8 +74,15 @@ jobs:
       - name: Build aarch64 ISO
         run: |
           nix build .#packages.aarch64-linux.iso -L
-          ISO_PATH=$(find "$(nix build .#packages.aarch64-linux.iso --print-out-paths --no-link)" -name '*.iso' | head -1)
-          cp "$ISO_PATH" claude-os-aarch64.iso
+          ISO_DIR=$(nix build .#packages.aarch64-linux.iso --print-out-paths --no-link)
+          ISO_FILE=$(find "$ISO_DIR" -name '*.iso' -type f | head -1)
+          if [ -n "$ISO_FILE" ]; then
+            cp "$ISO_FILE" claude-os-aarch64.iso
+          else
+            cp "$ISO_DIR"/iso/*.iso claude-os-aarch64.iso 2>/dev/null || \
+            cp -r "$ISO_DIR" claude-os-aarch64.iso
+          fi
+          ls -lh claude-os-aarch64.iso
 
       - name: Upload aarch64 artifacts
         uses: actions/upload-artifact@v4
