@@ -6,10 +6,8 @@
   ];
 
   # ISO label
-  isoImage.isoName = lib.mkForce "claude-os-${config.system.nixos.release}-${pkgs.stdenv.hostPlatform.system}.iso";
+  image.fileName = lib.mkForce "claude-os-${config.system.nixos.release}-${pkgs.stdenv.hostPlatform.system}.iso";
   isoImage.volumeID = lib.mkForce "CLAUDE-OS";
-
-  # Include the full system closure in the ISO
   isoImage.squashfsCompression = "zstd -Xcompression-level 6";
 
   # First-run setup script

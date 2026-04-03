@@ -235,7 +235,7 @@ build_snapshot() {
 
 # --- Trim signal stream (keep last 1000 lines) ---
 trim_stream() {
-  if [ -f "$STREAM_FILE" ] && [ $(wc -l < "$STREAM_FILE") -gt 1000 ]; then
+  if [ -f "$STREAM_FILE" ] && [ "$(wc -l < "$STREAM_FILE")" -gt 1000 ]; then
     tail -500 "$STREAM_FILE" > "$STREAM_FILE.tmp" && mv "$STREAM_FILE.tmp" "$STREAM_FILE"
   fi
 }

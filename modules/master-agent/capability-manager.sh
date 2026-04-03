@@ -130,7 +130,7 @@ case "${1:-help}" in
     generate_skill "$pkg"
 
     # Detect capabilities from package name/description
-    local pkg_desc=$(nix eval --raw "nixpkgs#${pkg}.meta.description" 2>/dev/null || echo "")
+    pkg_desc=$(nix eval --raw "nixpkgs#${pkg}.meta.description" 2>/dev/null || echo "")
     if [ -n "$pkg_desc" ]; then
       echo "Description: $pkg_desc"
       # Simple capability extraction from description keywords

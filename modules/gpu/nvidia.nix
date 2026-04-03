@@ -16,6 +16,9 @@ in
       nvidiaSettings = true;
     };
 
+    # Enable 32-bit support (required by NVIDIA docker integration)
+    hardware.graphics.enable32Bit = true;
+
     services.xserver.videoDrivers = [ "nvidia" ];
 
     environment.systemPackages = with pkgs; [
@@ -29,6 +32,7 @@ in
       CUDA_PATH = "${pkgs.cudaPackages.cudatoolkit}";
     };
 
+    # Docker with NVIDIA GPU support
     virtualisation.docker = {
       enable = true;
       enableNvidia = true;
