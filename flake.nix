@@ -55,6 +55,12 @@
         extraModules = [ vmModule ];
       };
 
+      # x86_64 VM without NVIDIA (for CI and non-GPU machines)
+      nixosConfigurations.claude-os-x86 = mkClaudeOS {
+        system = "x86_64-linux";
+        extraModules = [ vmModule ];
+      };
+
       # Production: x86_64-linux VM (full NVIDIA/CUDA + Ollama)
       nixosConfigurations.claude-os = mkClaudeOS {
         system = "x86_64-linux";
@@ -111,9 +117,11 @@
       packages.aarch64-linux.default = self.packages.aarch64-linux.vm;
       packages.aarch64-linux.iso = self.nixosConfigurations.claude-os-iso-arm.config.system.build.isoImage;
 
-      # Production VM + ISO (x86_64)
-      packages.x86_64-linux.vm = self.nixosConfigurations.claude-os.config.system.build.vm;
+      # x86_64 VM (without NVIDIA — builds on any machine)
+      packages.x86_64-linux.vm = self.nixosConfigurations.claude-os-x86.config.system.build.vm;
       packages.x86_64-linux.default = self.packages.x86_64-linux.vm;
+      # x86_64 VM with NVIDIA/CUDA (needs NVIDIA binary cache)
+      packages.x86_64-linux.vm-nvidia = self.nixosConfigurations.claude-os.config.system.build.vm;
       packages.x86_64-linux.iso = self.nixosConfigurations.claude-os-iso.config.system.build.isoImage;
 
       # =============================================

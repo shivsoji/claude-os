@@ -16,10 +16,10 @@ jobs:
       - uses: DeterminateSystems/nix-installer-action@main
 
       - uses: DeterminateSystems/magic-nix-cache-action@main
+        continue-on-error: true
 
-      - name: Check flake (dev + arm configs)
+      - name: Check flake evaluates
         run: |
-          # Full check on configs that don't require NVIDIA hardware
           nix eval .#nixosConfigurations.claude-os-dev.config.system.build.toplevel.name
           nix eval .#nixosConfigurations.claude-os-iso-arm.config.system.build.toplevel.name
           nix eval .#packages.aarch64-linux.vm.name
@@ -47,13 +47,9 @@ jobs:
       - uses: actions/checkout@v4
 
       - uses: DeterminateSystems/nix-installer-action@main
-        with:
-          extra-conf: |
-            extra-platforms = aarch64-linux
-            extra-substituters = https://cuda-maintainers.cachix.org
-            extra-trusted-public-keys = cuda-maintainers.cachix.org-1:0dq3bujKpuEPMCX6U4WylrUDZ9JyUG0VpVZa7CNfq5E=
 
       - uses: DeterminateSystems/magic-nix-cache-action@main
+        continue-on-error: true
 
       - name: Build x86_64 VM
         run: nix build .#packages.x86_64-linux.vm -L
@@ -75,6 +71,7 @@ jobs:
       - uses: DeterminateSystems/nix-installer-action@main
 
       - uses: DeterminateSystems/magic-nix-cache-action@main
+        continue-on-error: true
 
       - name: Build aarch64 VM
         run: nix build .#packages.aarch64-linux.vm -L
