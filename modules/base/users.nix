@@ -32,5 +32,5 @@
   ];
 
   # Auto-login on the first TTY (direct to Claude shell)
-  services.getty.autologinUser = "claude";
+  services.getty.autologinUser = lib.mkForce "claude";
 }
