@@ -115,7 +115,7 @@ in
     };
   };
 
-  # Install the skill file on boot
+  # Install skill file + register capabilities on boot
   systemd.services.claude-os-ollama-skill = {
     description = "Install Ollama skill file";
     wantedBy = [ "multi-user.target" ];
@@ -130,21 +130,76 @@ in
       mkdir -p ${STATE_DIR}/skills
       cp ${ollamaSkill} ${STATE_DIR}/skills/ollama.skill.md
 
-      # Register ollama as a capability in the genome
       if [ -f ${STATE_DIR}/genome/manifest.json ]; then
-        # Add local-inference capability if not present
         if ! ${pkgs.jq}/bin/jq -e '.capabilities | index("local-inference")' ${STATE_DIR}/genome/manifest.json >/dev/null 2>&1; then
           tmp=$(mktemp)
           ${pkgs.jq}/bin/jq '.capabilities += ["local-inference","llm","embeddings"]' \
             ${STATE_DIR}/genome/manifest.json > "$tmp" && mv "$tmp" ${STATE_DIR}/genome/manifest.json
         fi
-        # Add ollama to skills
         if ! ${pkgs.jq}/bin/jq -e '.skills | index("ollama")' ${STATE_DIR}/genome/manifest.json >/dev/null 2>&1; then
           tmp=$(mktemp)
           ${pkgs.jq}/bin/jq '.skills += ["ollama"]' \
             ${STATE_DIR}/genome/manifest.json > "$tmp" && mv "$tmp" ${STATE_DIR}/genome/manifest.json
         fi
       fi
+    '';
+  };
+
+  # Pull default models on first boot (after ollama is running)
+  systemd.services.claude-os-ollama-bootstrap = {
+    description = "Pull default Ollama models for offline operation";
+    wantedBy = [ "multi-user.target" ];
+    after = [ "ollama.service" "network-online.target" ];
+    wants = [ "network-online.target" ];
+    requires = [ "ollama.service" ];
+    serviceConfig = {
+      Type = "oneshot";
+      RemainAfterExit = true;
+      User = "claude";
+      Group = "users";
+      TimeoutStartSec = "600"; # Models can be large
+    };
+    path = [ pkgs.curl ];
+    script = ''
+      MARKER="${STATE_DIR}/state/.ollama-models-pulled"
+      OLLAMA="http://127.0.0.1:11434"
+
+      # Only pull on first boot
+      if [ -f "$MARKER" ]; then
+        echo "Models already pulled. Skipping."
+        exit 0
+      fi
+
+      # Wait for ollama API to be ready
+      for i in $(seq 1 30); do
+        if curl -sf "$OLLAMA/api/version" >/dev/null 2>&1; then
+          break
+        fi
+        echo "Waiting for Ollama API... ($i/30)"
+        sleep 2
+      done
+
+      if ! curl -sf "$OLLAMA/api/version" >/dev/null 2>&1; then
+        echo "Ollama API not available. Skipping model pull."
+        exit 0
+      fi
+
+      echo "Pulling default models for offline operation..."
+
+      # Primary reasoning model (small, fast)
+      echo "Pulling phi3:mini (3.8B)..."
+      curl -sf "$OLLAMA/api/pull" -d '{"name":"phi3:mini","stream":false}' || \
+        echo "Warning: Failed to pull phi3:mini"
+
+      # Embedding model (for semantic search)
+      echo "Pulling nomic-embed-text..."
+      curl -sf "$OLLAMA/api/pull" -d '{"name":"nomic-embed-text","stream":false}' || \
+        echo "Warning: Failed to pull nomic-embed-text"
+
+      # Mark as done
+      mkdir -p "$(dirname "$MARKER")"
+      date -Iseconds > "$MARKER"
+      echo "Default models pulled successfully."
     '';
   };
 

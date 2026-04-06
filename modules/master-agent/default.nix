@@ -12,6 +12,12 @@ let
   # The goal planner CLI — structures goals into plans
   goalPlanner = pkgs.writeShellScriptBin "claude-os-plan" (builtins.readFile ./goal-planner.sh);
 
+  # Complexity router — Ollama vs Claude API dispatch
+  complexityRouter = pkgs.writeShellScriptBin "claude-os-route" (builtins.readFile ./route.sh);
+
+  # Tiered execution with audit trail
+  tieredExec = pkgs.writeShellScriptBin "claude-os-exec" (builtins.readFile ./exec.sh);
+
   # Master agent launcher — starts Claude as a persistent daemon
   masterAgent = pkgs.writeShellScriptBin "claude-os-master" ''
     set -uo pipefail
@@ -176,6 +182,71 @@ CTXEOF
           "$STATE_DIR/agents/registry.json" > "$tmp" 2>/dev/null && mv "$tmp" "$STATE_DIR/agents/registry.json"
       fi
 
+      # === THINK LOOP: AI reasoning every 12 cycles (60s) ===
+      if [ $((CYCLE % 12)) -eq 0 ]; then
+        OLLAMA_URL="http://127.0.0.1:11434"
+        if ${pkgs.curl}/bin/curl -sf "$OLLAMA_URL/api/version" >/dev/null 2>&1; then
+          # Gather context for the think prompt
+          sys_status=$(cat "$STATE_DIR/awareness/system-status.json" 2>/dev/null || echo '{}')
+          recent_signals=$(tail -10 "$STATE_DIR/awareness/signal-stream.jsonl" 2>/dev/null | ${pkgs.jq}/bin/jq -Rs 'split("\n") | map(select(. != "") | fromjson? // {}) | map("\(.ts // "") [\(.severity // "")] \(.source // "")/\(.type // ""): \(.message // "")") | join("\n")' 2>/dev/null || echo "none")
+          agent_count=$(${pkgs.jq}/bin/jq '.agents | length' "$STATE_DIR/agents/registry.json" 2>/dev/null || echo 0)
+          genome_gen=$(${pkgs.jq}/bin/jq '.generation' "$GENOME_DIR/manifest.json" 2>/dev/null || echo 0)
+          pending_goals=$(ls "$STATE_DIR/goals/active/"*.json 2>/dev/null | wc -l || echo 0)
+          health_status=$(cat "$STATE_DIR/awareness/health.json" 2>/dev/null || echo '{"healthy":true}')
+
+          think_prompt="You are the master agent of Claude-OS (generation $genome_gen).
+Analyze the system state and decide what actions to take.
+
+SYSTEM STATUS:
+$(echo "$sys_status" | ${pkgs.jq}/bin/jq -r '"CPU: \(.resources.cpu.load_1m // "?") | MEM: \(.resources.memory.used_pct // "?")% | DISK: \(.resources.disk.root_used_pct // "?")%"' 2>/dev/null || echo "unavailable")
+
+HEALTH: $(echo "$health_status" | ${pkgs.jq}/bin/jq -r 'if .healthy then "OK" else "DEGRADED (failed: \(.failed_services // 0))" end' 2>/dev/null || echo "unknown")
+
+RECENT SIGNALS:
+$recent_signals
+
+ACTIVE AGENTS: $agent_count
+PENDING GOALS: $pending_goals
+
+Respond with a JSON object:
+{\"analysis\": \"brief observation\", \"actions\": [{\"type\": \"none|heal|remember|log\", \"detail\": \"what to do\"}]}
+Only suggest actions if something actually needs attention. If everything is fine, respond with type 'none'."
+
+          # Call Ollama
+          think_response=$(${pkgs.curl}/bin/curl -sf --max-time 30 "$OLLAMA_URL/api/chat" -d "$(${pkgs.jq}/bin/jq -n \
+            --arg prompt "$think_prompt" \
+            '{model: "phi3:mini", messages: [{role: "user", content: $prompt}], stream: false}'
+          )" | ${pkgs.jq}/bin/jq -r '.message.content // ""' 2>/dev/null)
+
+          if [ -n "$think_response" ]; then
+            # Log the thinking
+            log "THINK: $(echo "$think_response" | ${pkgs.jq}/bin/jq -r '.analysis // .[:200]' 2>/dev/null || echo "$think_response" | head -c 200)"
+
+            # Try to parse and execute actions
+            echo "$think_response" | ${pkgs.jq}/bin/jq -c '.actions[]?' 2>/dev/null | while read -r action; do
+              action_type=$(echo "$action" | ${pkgs.jq}/bin/jq -r '.type' 2>/dev/null)
+              action_detail=$(echo "$action" | ${pkgs.jq}/bin/jq -r '.detail // .reason // ""' 2>/dev/null)
+
+              case "$action_type" in
+                heal)
+                  log "THINK-ACT: heal — $action_detail"
+                  ;;
+                remember)
+                  log "THINK-ACT: remember — $action_detail"
+                  claude-os-memory remember system_fact "master-observation" "$action_detail" 2>/dev/null || true
+                  ;;
+                log)
+                  log "THINK-ACT: log — $action_detail"
+                  ;;
+                none)
+                  # All good, nothing to do
+                  ;;
+              esac
+            done
+          fi
+        fi
+      fi
+
       sleep 5
     done
   '';
@@ -187,6 +258,8 @@ in
     evolutionEngine
     capabilityManager
     goalPlanner
+    complexityRouter
+    tieredExec
   ];
 
   # Master agent systemd service
