@@ -30,7 +30,7 @@ let
     ollama pull nomic-embed-text  # Embeddings
     ollama pull llava             # Vision (image understanding)
     ollama pull mistral           # 7B general purpose
-    ollama pull phi3:mini         # 3.8B, fast, good for small tasks
+    ollama pull gemma4:31b-cloud         # 31B, strong reasoning + tool use
     ```
 
     ### Run interactive chat
@@ -78,9 +78,8 @@ let
     ## Model selection guide
     | Model | Size | Best for |
     |-------|------|----------|
-    | phi3:mini | 3.8B | Fast tasks, limited VRAM |
-    | llama3.2 | 3B | General purpose, balanced |
-    | llama3.2:70b | 70B | Best quality (needs lots of VRAM) |
+    | gemma4:31b-cloud | 31B | Default — strong reasoning, tool use, agentic |
+    | llama3.2 | 3B | Fast tasks, low VRAM |
     | codellama:13b | 13B | Code generation |
     | mistral | 7B | General, good quality/speed ratio |
     | nomic-embed-text | 137M | Embeddings only |
@@ -187,9 +186,9 @@ in
       echo "Pulling default models for offline operation..."
 
       # Primary reasoning model (small, fast)
-      echo "Pulling phi3:mini (3.8B)..."
-      curl -sf "$OLLAMA/api/pull" -d '{"name":"phi3:mini","stream":false}' || \
-        echo "Warning: Failed to pull phi3:mini"
+      echo "Pulling gemma4:31b-cloud (31B)..."
+      curl -sf "$OLLAMA/api/pull" -d '{"name":"gemma4:31b-cloud","stream":false}' || \
+        echo "Warning: Failed to pull gemma4:31b-cloud"
 
       # Embedding model (for semantic search)
       echo "Pulling nomic-embed-text..."

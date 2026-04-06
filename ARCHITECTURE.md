@@ -82,7 +82,7 @@ route_prompt() {
 Boot → systemd
   → Ollama starts (no internet needed)
   → Master agent starts with Ollama backend (immediate)
-  → Pull default model if not cached (phi3:mini, 2.3GB, one-time)
+  → Pull default model if not cached (gemma4:31b-cloud, ~19GB, one-time)
   → Shell agent starts
     → If ANTHROPIC_API_KEY set: Claude Code as shell
     → If no key: Ollama-powered shell (simpler but functional)
@@ -91,7 +91,7 @@ Boot → systemd
 
 ### What Changes
 
-- `claude-os-bootstrap` pulls `phi3:mini` + `nomic-embed-text` on first boot (if online)
+- `claude-os-bootstrap` pulls `gemma4:31b-cloud` + `nomic-embed-text` on first boot (if online)
 - Shell agent checks for API key. If missing, launches an Ollama-backed interactive mode
 - Master agent uses Ollama for routine decisions (signal analysis, health)
 - Master agent escalates to Claude API for complex tasks (if key available)

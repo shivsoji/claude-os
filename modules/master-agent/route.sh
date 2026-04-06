@@ -12,7 +12,7 @@ set -uo pipefail
 
 STATE_DIR="${CLAUDE_OS_STATE:-/var/lib/claude-os}"
 OLLAMA_URL="${OLLAMA_URL:-http://127.0.0.1:11434}"
-OLLAMA_MODEL="${OLLAMA_MODEL:-phi3:mini}"
+OLLAMA_MODEL="${OLLAMA_MODEL:-gemma4:31b-cloud}"
 API_BUDGET_FILE="$STATE_DIR/state/api-budget.json"
 
 export PATH="/run/current-system/sw/bin:$PATH"

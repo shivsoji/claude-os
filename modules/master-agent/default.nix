@@ -215,7 +215,7 @@ Only suggest actions if something actually needs attention. If everything is fin
           # Call Ollama
           think_response=$(${pkgs.curl}/bin/curl -sf --max-time 30 "$OLLAMA_URL/api/chat" -d "$(${pkgs.jq}/bin/jq -n \
             --arg prompt "$think_prompt" \
-            '{model: "phi3:mini", messages: [{role: "user", content: $prompt}], stream: false}'
+            '{model: "gemma4:31b-cloud", messages: [{role: "user", content: $prompt}], stream: false}'
           )" | ${pkgs.jq}/bin/jq -r '.message.content // ""' 2>/dev/null)
 
           if [ -n "$think_response" ]; then
