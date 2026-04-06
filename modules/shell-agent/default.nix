@@ -53,8 +53,18 @@ SYSTEM_PROMPT
         > "$STATE_DIR/agents/inbox/shell-login-$$.json" 2>/dev/null || true
     fi
 
+    # Start heartbeat background process
+    mkdir -p "$STATE_DIR/agents/heartbeats"
+    (while true; do
+      claude-os-agents heartbeat $$ 2>/dev/null || true
+      sleep 10
+    done) &
+    HEARTBEAT_PID=$!
+
     # Set up logout notification trap
     cleanup() {
+      kill $HEARTBEAT_PID 2>/dev/null || true
+      rm -f "$STATE_DIR/agents/heartbeats/$$.json" 2>/dev/null || true
       if [ -d "$STATE_DIR/agents/inbox" ]; then
         echo "{\"type\": \"shell-logout\", \"pid\": $$, \"timestamp\": \"$(date -Iseconds)\"}" \
           > "$STATE_DIR/agents/inbox/shell-logout-$$.json" 2>/dev/null || true

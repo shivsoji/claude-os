@@ -165,34 +165,67 @@ EOF
     ;;
 
   apply)
-    echo "Applying evolution — rebuilding system..."
+    echo "Applying evolution — sandbox build then switch..."
+
+    gen=$(jq '.generation' "$EVOLUTION_LOG" 2>/dev/null || echo 0)
+    new_gen=$((gen + 1))
+
+    # Acquire lock (prevent concurrent rebuilds)
+    lockfile="$STATE_DIR/agents/locks/nix-rebuild.lock"
+    exec 200>"$lockfile"
+    if ! flock -w 10 200; then
+      echo "ERROR: Another rebuild is in progress. Wait or check 'claude-os-agents locks'."
+      exit 1
+    fi
+    echo "{\"pid\":$$,\"acquired\":\"$(date -Iseconds)\"}" > "$lockfile.info"
+
+    # === PHASE 1: Sandbox build (no system change) ===
+    echo "[$new_gen] Phase 1/2: Sandbox build (dry run)..."
+    if sudo nixos-rebuild build --flake /etc/claude-os#claude-os 2>&1; then
+      echo "[$new_gen] Sandbox build succeeded."
+    else
+      echo "ERROR: Sandbox build failed. System is unchanged."
+      log_mutation "apply-sandbox-failed" "Sandbox build failed for generation $new_gen" "{\"generation\":$new_gen}"
+      update_fitness "errors_recovered"
+      rm -f "$lockfile.info"
+      flock -u 200
+      exit 1
+    fi
+
+    # === PHASE 2: Apply (switch) ===
+    echo "[$new_gen] Phase 2/2: Switching to new generation..."
+
+    # Snapshot genome before switching
+    cp "$GENOME" "$STATE_DIR/evolution/history/gen-${new_gen}-$(date +%Y%m%d%H%M%S).json"
 
     # Increment generation
-    gen=$(jq '.generation' "$EVOLUTION_LOG")
-    new_gen=$((gen + 1))
     tmp=$(mktemp)
     jq --argjson g "$new_gen" '.generation = $g' "$EVOLUTION_LOG" > "$tmp" && mv "$tmp" "$EVOLUTION_LOG"
     tmp=$(mktemp)
     jq --argjson g "$new_gen" '.generation = $g' "$GENOME" > "$tmp" && mv "$tmp" "$GENOME"
 
-    # Snapshot current genome to history
-    cp "$GENOME" "$STATE_DIR/evolution/history/gen-${new_gen}-$(date +%Y%m%d%H%M%S).json"
-
-    # Rebuild NixOS
-    echo "Generation $new_gen — rebuilding NixOS..."
     if sudo nixos-rebuild switch --flake /etc/claude-os#claude-os 2>&1; then
       log_mutation "apply" "System evolved to generation $new_gen" "{\"generation\":$new_gen}"
+      update_fitness "tasks_completed"
+      echo ""
       echo "Evolution successful! System is now generation $new_gen"
     else
-      echo "ERROR: NixOS rebuild failed. Rolling back generation counter."
+      echo "ERROR: Switch failed after successful build. Rolling back."
       tmp=$(mktemp)
       jq --argjson g "$gen" '.generation = $g' "$EVOLUTION_LOG" > "$tmp" && mv "$tmp" "$EVOLUTION_LOG"
       tmp=$(mktemp)
       jq --argjson g "$gen" '.generation = $g' "$GENOME" > "$tmp" && mv "$tmp" "$GENOME"
-      log_mutation "apply-failed" "Failed to evolve to generation $new_gen" "{\"generation\":$new_gen}"
+      log_mutation "apply-switch-failed" "Switch failed for generation $new_gen (build succeeded)" "{\"generation\":$new_gen}"
       update_fitness "errors_recovered"
-      exit 1
+
+      # Auto-rollback
+      echo "Attempting NixOS rollback..."
+      sudo nixos-rebuild switch --rollback 2>&1 || echo "WARNING: Rollback also failed."
     fi
+
+    # Release lock
+    rm -f "$lockfile.info"
+    flock -u 200
     ;;
 
   rollback)
