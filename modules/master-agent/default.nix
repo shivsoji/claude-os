@@ -18,6 +18,12 @@ let
   # Tiered execution with audit trail
   tieredExec = pkgs.writeShellScriptBin "claude-os-exec" (builtins.readFile ./exec.sh);
 
+  # Capability compositions
+  compositions = pkgs.writeShellScriptBin "claude-os-compose" (builtins.readFile ./compositions.sh);
+
+  # Skill injection and refinement
+  skillHooks = pkgs.writeShellScriptBin "claude-os-skill" (builtins.readFile ./skill-hooks.sh);
+
   # Master agent launcher — starts Claude as a persistent daemon
   masterAgent = pkgs.writeShellScriptBin "claude-os-master" ''
     set -uo pipefail
@@ -260,6 +266,8 @@ in
     goalPlanner
     complexityRouter
     tieredExec
+    compositions
+    skillHooks
   ];
 
   # Master agent systemd service

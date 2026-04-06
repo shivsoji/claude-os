@@ -116,10 +116,37 @@ CREATE TRIGGER IF NOT EXISTS entities_fts_delete AFTER DELETE ON entities BEGIN
 END;
 
 -- ============================================
+-- Embeddings — vector storage for semantic search
+-- ============================================
+CREATE TABLE IF NOT EXISTS embeddings (
+    entity_id INTEGER PRIMARY KEY REFERENCES entities(id) ON DELETE CASCADE,
+    vector    BLOB NOT NULL,       -- float32 array stored as blob
+    model     TEXT DEFAULT 'nomic-embed-text',
+    dims      INTEGER DEFAULT 768, -- nomic-embed-text dimension
+    created_at DATETIME DEFAULT (datetime('now'))
+);
+
+-- ============================================
+-- Importance scores — topology-aware decay input
+-- ============================================
+-- Materialized by the intelligent decay process, not a live view
+-- (computing graph centrality on every query would be too slow)
+CREATE TABLE IF NOT EXISTS importance (
+    entity_id  INTEGER PRIMARY KEY REFERENCES entities(id) ON DELETE CASCADE,
+    connection_count INTEGER DEFAULT 0,   -- total edges
+    in_degree        INTEGER DEFAULT 0,   -- edges pointing to this entity
+    out_degree       INTEGER DEFAULT 0,   -- edges from this entity
+    hub_score        REAL DEFAULT 0.0,    -- is this a hub? (many outgoing)
+    authority_score  REAL DEFAULT 0.0,    -- is this authoritative? (many incoming)
+    importance       REAL DEFAULT 0.5,    -- composite importance 0-1
+    computed_at      DATETIME DEFAULT (datetime('now'))
+);
+
+-- ============================================
 -- Views for common queries
 -- ============================================
 
--- Relevance-scored entities for context loading
+-- Relevance-scored entities with topology-aware importance
 CREATE VIEW IF NOT EXISTS v_relevant_entities AS
 SELECT
     e.id,
@@ -129,18 +156,15 @@ SELECT
     e.tags,
     e.access_count,
     e.decay_score,
-    -- Relevance = recency * frequency * decay * connection_density
+    COALESCE(imp.importance, 0.5) as importance,
+    -- Relevance = decay * frequency * recency * importance * connections
     (
         e.decay_score *
         (1.0 + ln(1 + e.access_count)) *
         (1.0 / (1.0 + (julianday('now') - julianday(e.last_accessed)))) *
+        (0.5 + COALESCE(imp.importance, 0.5)) *
         (1.0 + (SELECT COUNT(*) FROM relations WHERE src_id = e.id OR dst_id = e.id) * 0.1)
     ) AS relevance_score
 FROM entities e
+LEFT JOIN importance imp ON imp.entity_id = e.id
 ORDER BY relevance_score DESC;
-
--- Graph neighborhood: entities connected to a given entity
--- Usage: SELECT * FROM v_relevant_entities WHERE id IN (
---          SELECT dst_id FROM relations WHERE src_id = ?
---          UNION SELECT src_id FROM relations WHERE dst_id = ?
---        )

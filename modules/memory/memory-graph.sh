@@ -319,6 +319,123 @@ case "${1:-help}" in
     echo "Decay applied. ${forgotten:-0} entities below forget threshold."
     ;;
 
+  embed)
+    id="${2:?Usage: claude-os-memory embed <entity_id>}"
+    OLLAMA_URL="${OLLAMA_URL:-http://127.0.0.1:11434}"
+
+    # Check if already embedded
+    existing=$(sql_plain "SELECT COUNT(*) FROM embeddings WHERE entity_id = $id;")
+    if [ "${existing:-0}" -gt 0 ]; then
+      echo "Entity #$id already has an embedding."
+      exit 0
+    fi
+
+    # Get entity content
+    content=$(sql_plain "SELECT name || ' ' || content FROM entities WHERE id = $id;")
+    if [ -z "$content" ]; then
+      echo "Entity #$id not found."
+      exit 1
+    fi
+
+    # Call Ollama embedding API
+    if ! curl -sf "$OLLAMA_URL/api/version" >/dev/null 2>&1; then
+      echo "Ollama not available. Cannot generate embedding."
+      exit 1
+    fi
+
+    # Get embedding vector as JSON array
+    vector_json=$(curl -sf "$OLLAMA_URL/api/embed" -d "$(jq -n --arg text "$content" \
+      '{model: "nomic-embed-text", input: $text}')" | jq -r '.embeddings[0] // empty' 2>/dev/null)
+
+    if [ -z "$vector_json" ]; then
+      echo "Failed to generate embedding."
+      exit 1
+    fi
+
+    # Store as hex-encoded blob (SQLite-friendly)
+    # Convert JSON float array to binary via python
+    python3 -c "
+import struct, json, sqlite3, sys
+vec = json.loads(sys.argv[1])
+blob = struct.pack(f'{len(vec)}f', *vec)
+db = sqlite3.connect(sys.argv[2])
+db.execute('INSERT OR REPLACE INTO embeddings (entity_id, vector, dims) VALUES (?, ?, ?)', ($id, blob, len(vec)))
+db.commit()
+" "$vector_json" "$DB" 2>/dev/null
+
+    echo "Embedded: entity #$id ($(echo "$vector_json" | jq 'length') dims)"
+    ;;
+
+  embed-all)
+    echo "Embedding all entities without embeddings..."
+    OLLAMA_URL="${OLLAMA_URL:-http://127.0.0.1:11434}"
+
+    if ! curl -sf "$OLLAMA_URL/api/version" >/dev/null 2>&1; then
+      echo "Ollama not available."
+      exit 1
+    fi
+
+    count=0
+    while read -r id; do
+      [ -z "$id" ] && continue
+      claude-os-memory embed "$id" 2>/dev/null && count=$((count + 1))
+    done < <(sql_plain "SELECT id FROM entities WHERE id NOT IN (SELECT entity_id FROM embeddings);")
+    echo "Embedded $count entities."
+    ;;
+
+  semantic-search)
+    shift
+    query="${*:?Usage: claude-os-memory semantic-search <query>}"
+    OLLAMA_URL="${OLLAMA_URL:-http://127.0.0.1:11434}"
+    limit=10
+
+    if ! curl -sf "$OLLAMA_URL/api/version" >/dev/null 2>&1; then
+      echo "Ollama not available. Falling back to FTS search."
+      claude-os-memory recall "$query"
+      exit
+    fi
+
+    # Get query embedding
+    query_vec=$(curl -sf "$OLLAMA_URL/api/embed" -d "$(jq -n --arg text "$query" \
+      '{model: "nomic-embed-text", input: $text}')" | jq -r '.embeddings[0] // empty' 2>/dev/null)
+
+    if [ -z "$query_vec" ]; then
+      echo "Failed to embed query. Falling back to FTS."
+      claude-os-memory recall "$query"
+      exit
+    fi
+
+    # Compute cosine similarity in Python (SQLite can't do vector math natively)
+    python3 -c "
+import struct, json, sqlite3, sys
+
+query_vec = json.loads(sys.argv[1])
+db = sqlite3.connect(sys.argv[2])
+limit = int(sys.argv[3])
+
+def cosine_sim(a, b):
+    dot = sum(x*y for x,y in zip(a,b))
+    na = sum(x*x for x in a)**0.5
+    nb = sum(x*x for x in b)**0.5
+    return dot/(na*nb) if na and nb else 0
+
+results = []
+for row in db.execute('SELECT e.id, e.type, e.name, substr(e.content,1,200), e.tags, emb.vector, emb.dims FROM embeddings emb JOIN entities e ON e.id = emb.entity_id'):
+    eid, etype, name, content, tags, blob, dims = row
+    vec = list(struct.unpack(f'{dims}f', blob))
+    sim = cosine_sim(query_vec, vec)
+    results.append((sim, eid, etype, name, content, tags))
+
+results.sort(reverse=True)
+for sim, eid, etype, name, content, tags in results[:limit]:
+    print(f'[{sim:.3f}] #{eid} [{etype}] {name}')
+    print(f'  {content}')
+    if tags:
+        print(f'  Tags: {tags}')
+    print()
+" "$query_vec" "$DB" "$limit"
+    ;;
+
   export)
     echo "{"
     echo '  "entities":'
@@ -337,6 +454,11 @@ case "${1:-help}" in
     echo "  recall <query>              FTS5 full-text search"
     echo "  recall-id <id>              Get entity by ID"
     echo "  forget <id>                 Remove an entity"
+    echo ""
+    echo "Semantic search:"
+    echo "  embed <id>                  Generate embedding for an entity"
+    echo "  embed-all                   Embed all unembedded entities"
+    echo "  semantic-search <query>     Cosine similarity search via embeddings"
     echo ""
     echo "Graph:"
     echo "  relate <src> <dst> <type> [weight]   Create relation"
