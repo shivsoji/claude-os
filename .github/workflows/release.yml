@@ -33,8 +33,50 @@ jobs:
         run: |
           nix build .#${{ matrix.target }} -L
           VM_PATH=$(nix build .#${{ matrix.target }} --print-out-paths --no-link)
-          # Archive just the bin/ directory (the run script)
-          tar czf claude-os-vm-${{ matrix.arch }}.tar.gz -C "$VM_PATH" bin/
+          echo "VM_PATH=$VM_PATH" >> $GITHUB_ENV
+
+      - name: Export nix closure
+        run: |
+          # Export the full nix closure so the VM is self-contained
+          nix copy --to file:///tmp/claude-os-export .#${{ matrix.target }}
+
+          # Create an install script
+          cat > /tmp/claude-os-export/install.sh << 'INSTALL'
+          #!/usr/bin/env bash
+          set -e
+          echo "Installing Claude-OS VM into your nix store..."
+
+          if ! command -v nix >/dev/null 2>&1; then
+            echo "Error: nix is not installed."
+            echo "Install it: curl --proto '=https' --tlsv1.2 -sSf -L https://install.determinate.systems/nix | sh -s -- install"
+            exit 1
+          fi
+
+          SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+          echo "Importing nix closure..."
+          nix copy --from "file://$SCRIPT_DIR" --all --no-check-sigs
+
+          # Find and symlink the run script
+          VM_RUN=$(find /nix/store -maxdepth 2 -name "run-claude-os-vm" -path "*/bin/*" 2>/dev/null | head -1)
+          if [ -n "$VM_RUN" ]; then
+            mkdir -p "$SCRIPT_DIR/bin"
+            ln -sf "$VM_RUN" "$SCRIPT_DIR/bin/run-claude-os-vm"
+            echo ""
+            echo "Claude-OS VM installed!"
+            echo "Run: $SCRIPT_DIR/bin/run-claude-os-vm"
+            echo "SSH: ssh -p 2222 claude@localhost (password: claude-os)"
+          else
+            echo "Error: Could not find run script in nix store."
+            exit 1
+          fi
+          INSTALL
+          chmod +x /tmp/claude-os-export/install.sh
+
+          # Also write the store path for direct nix users
+          echo "${{ env.VM_PATH }}" > /tmp/claude-os-export/STORE_PATH
+
+          # Tar it all up
+          tar czf claude-os-vm-${{ matrix.arch }}.tar.gz -C /tmp claude-os-export/
           ls -lh claude-os-vm-${{ matrix.arch }}.tar.gz
 
       - name: Upload artifact
@@ -70,37 +112,45 @@ jobs:
           body: |
             ## Claude-OS ${{ github.ref_name }}
 
-            AI-native, self-evolving operating system built on NixOS. Claude is your shell.
+            AI-native, self-evolving operating system built on NixOS.
 
             ### Downloads
 
             | File | Description |
             |------|-------------|
-            | `claude-os-vm-x86_64.tar.gz` | QEMU VM (Intel/AMD) |
-            | `claude-os-vm-aarch64.tar.gz` | QEMU VM (ARM64 / Apple Silicon via OrbStack) |
+            | `claude-os-vm-x86_64.tar.gz` | QEMU VM — nix closure (Intel/AMD) |
+            | `claude-os-vm-aarch64.tar.gz` | QEMU VM — nix closure (ARM64 / Apple Silicon) |
 
-            > **ISOs**: Build locally with `nix build .#packages.x86_64-linux.iso` (takes ~30 min)
+            ### Install & Run
 
-            ### Quick Start
+            **Requires [nix](https://install.determinate.systems/nix) on your system.**
 
             ```bash
+            # Download and extract
             tar xzf claude-os-vm-aarch64.tar.gz
+            cd claude-os-export
+
+            # Import into nix store and create run script
+            bash install.sh
+
+            # Boot the VM
             ./bin/run-claude-os-vm
-            # In another terminal:
+
+            # SSH in (from another terminal)
             ssh -p 2222 claude@localhost
             # Password: claude-os
             ```
 
-            ### What's Inside
+            **Or build from source (no download needed):**
+            ```bash
+            git clone https://github.com/shivsoji/claude-os.git
+            cd claude-os
+            nix build .#vm
+            ./result/bin/run-claude-os-vm
+            ```
 
-            - **Claude Code** as login shell with full system access
-            - **Master agent** — always-on orchestration daemon
-            - **Evolution engine** — genome-based self-mutation with rollback
-            - **Memory graph** — SQLite + FTS5 with decay and context windows
-            - **Awareness** — live system sensing, self-healing, agent coordination
-            - **Ollama** — local LLM inference on port 11434
-            - **50+ CLI tools** — `claude-os-evolve`, `claude-os-cap`, `claude-os-plan`, `claude-os-memory`, `claude-os-sense`, `claude-os-agents`, `claude-os-health`
+            ### What's in ${{ github.ref_name }}
 
-            See [README](https://github.com/shivsoji/claude-os#readme) for full documentation.
+            See [CHANGELOG](https://github.com/shivsoji/claude-os/compare/v0.2.0...${{ github.ref_name }}) for full diff.
           files: |
             artifacts/*
