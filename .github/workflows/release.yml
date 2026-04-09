@@ -30,53 +30,54 @@ jobs:
         continue-on-error: true
 
       - name: Build ${{ matrix.arch }} VM
-        run: |
-          nix build .#${{ matrix.target }} -L
-          VM_PATH=$(nix build .#${{ matrix.target }} --print-out-paths --no-link)
-          echo "VM_PATH=$VM_PATH" >> $GITHUB_ENV
+        run: nix build .#${{ matrix.target }} -L
 
       - name: Export nix closure
         run: |
-          # Export the full nix closure so the VM is self-contained
-          nix copy --to file:///tmp/claude-os-export .#${{ matrix.target }}
+          VM_PATH=$(nix build .#${{ matrix.target }} --print-out-paths --no-link)
+          echo "VM store path: $VM_PATH"
 
-          # Create an install script
-          cat > /tmp/claude-os-export/install.sh << 'INSTALL'
+          # Export full closure as a single binary stream
+          nix-store --export $(nix-store -qR "$VM_PATH") > /tmp/claude-os-closure.nar
+
+          # Create wrapper with install script
+          mkdir -p /tmp/claude-os-pkg
+          mv /tmp/claude-os-closure.nar /tmp/claude-os-pkg/closure.nar
+          echo "$VM_PATH" > /tmp/claude-os-pkg/VM_STORE_PATH
+
+          cat > /tmp/claude-os-pkg/install.sh << 'SCRIPT'
           #!/usr/bin/env bash
           set -e
-          echo "Installing Claude-OS VM into your nix store..."
-
-          if ! command -v nix >/dev/null 2>&1; then
-            echo "Error: nix is not installed."
-            echo "Install it: curl --proto '=https' --tlsv1.2 -sSf -L https://install.determinate.systems/nix | sh -s -- install"
-            exit 1
-          fi
-
           SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-          echo "Importing nix closure..."
-          nix copy --from "file://$SCRIPT_DIR" --all --no-check-sigs
 
-          # Find and symlink the run script
-          VM_RUN=$(find /nix/store -maxdepth 2 -name "run-claude-os-vm" -path "*/bin/*" 2>/dev/null | head -1)
-          if [ -n "$VM_RUN" ]; then
-            mkdir -p "$SCRIPT_DIR/bin"
-            ln -sf "$VM_RUN" "$SCRIPT_DIR/bin/run-claude-os-vm"
-            echo ""
-            echo "Claude-OS VM installed!"
-            echo "Run: $SCRIPT_DIR/bin/run-claude-os-vm"
-            echo "SSH: ssh -p 2222 claude@localhost (password: claude-os)"
-          else
-            echo "Error: Could not find run script in nix store."
+          if ! command -v nix-store >/dev/null 2>&1; then
+            echo "Error: nix is not installed."
+            echo "Install: curl --proto '=https' --tlsv1.2 -sSf -L https://install.determinate.systems/nix | sh -s -- install"
             exit 1
           fi
-          INSTALL
-          chmod +x /tmp/claude-os-export/install.sh
 
-          # Also write the store path for direct nix users
-          echo "${{ env.VM_PATH }}" > /tmp/claude-os-export/STORE_PATH
+          echo "Importing Claude-OS VM into nix store..."
+          sudo nix-store --import < "$SCRIPT_DIR/closure.nar"
 
-          # Tar it all up
-          tar czf claude-os-vm-${{ matrix.arch }}.tar.gz -C /tmp claude-os-export/
+          VM_PATH=$(cat "$SCRIPT_DIR/VM_STORE_PATH")
+          RUN_SCRIPT="$VM_PATH/bin/run-claude-os-vm"
+
+          if [ -x "$RUN_SCRIPT" ]; then
+            mkdir -p "$SCRIPT_DIR/bin"
+            ln -sf "$RUN_SCRIPT" "$SCRIPT_DIR/bin/run-claude-os-vm"
+            echo ""
+            echo "Claude-OS installed!"
+            echo "Run:  $SCRIPT_DIR/bin/run-claude-os-vm"
+            echo "SSH:  ssh -p 2222 claude@localhost  (password: claude-os)"
+          else
+            echo "Error: Run script not found at $RUN_SCRIPT"
+            exit 1
+          fi
+          SCRIPT
+          chmod +x /tmp/claude-os-pkg/install.sh
+
+          # Compress
+          tar czf claude-os-vm-${{ matrix.arch }}.tar.gz -C /tmp claude-os-pkg/
           ls -lh claude-os-vm-${{ matrix.arch }}.tar.gz
 
       - name: Upload artifact
@@ -118,39 +119,25 @@ jobs:
 
             | File | Description |
             |------|-------------|
-            | `claude-os-vm-x86_64.tar.gz` | QEMU VM — nix closure (Intel/AMD) |
-            | `claude-os-vm-aarch64.tar.gz` | QEMU VM — nix closure (ARM64 / Apple Silicon) |
+            | `claude-os-vm-x86_64.tar.gz` | QEMU VM — full nix closure (Intel/AMD) |
+            | `claude-os-vm-aarch64.tar.gz` | QEMU VM — full nix closure (ARM64 / Apple Silicon) |
 
             ### Install & Run
 
-            **Requires [nix](https://install.determinate.systems/nix) on your system.**
+            **Requires [nix](https://install.determinate.systems/nix) on the host.**
 
             ```bash
-            # Download and extract
             tar xzf claude-os-vm-aarch64.tar.gz
-            cd claude-os-export
-
-            # Import into nix store and create run script
-            bash install.sh
-
-            # Boot the VM
+            cd claude-os-pkg
+            sudo bash install.sh
             ./bin/run-claude-os-vm
-
-            # SSH in (from another terminal)
-            ssh -p 2222 claude@localhost
-            # Password: claude-os
+            # SSH: ssh -p 2222 claude@localhost (password: claude-os)
             ```
 
-            **Or build from source (no download needed):**
+            **Or build from source:**
             ```bash
-            git clone https://github.com/shivsoji/claude-os.git
-            cd claude-os
-            nix build .#vm
+            nix build github:shivsoji/claude-os#vm
             ./result/bin/run-claude-os-vm
             ```
-
-            ### What's in ${{ github.ref_name }}
-
-            See [CHANGELOG](https://github.com/shivsoji/claude-os/compare/v0.2.0...${{ github.ref_name }}) for full diff.
           files: |
             artifacts/*
