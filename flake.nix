@@ -17,6 +17,7 @@
         ./modules/memory
         ./modules/awareness
         ./modules/gpu
+        ./modules/platform
       ];
 
       # Helper to build a claude-os NixOS configuration
@@ -39,6 +40,7 @@
           forwardPorts = [
             { from = "host"; host.port = 2222; guest.port = 22; }
             { from = "host"; host.port = 11434; guest.port = 11434; } # Ollama API
+            { from = "host"; host.port = 8420; guest.port = 8420; }   # Platform API
           ];
         };
       };
