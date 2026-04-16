@@ -281,14 +281,44 @@ async function handleMemory(req: http.IncomingMessage, res: http.ServerResponse,
 // ============================================
 // HTTP Server
 // ============================================
+let hasSupabase = false;
+let hasNeo4j = false;
+
 async function main() {
   console.log("Initializing Claude-OS Platform...");
 
-  // Connect to backends
-  await waitForDb();
-  await initNeo4j();
+  // Connect to backends (optional — graceful degradation)
+  try {
+    await waitForDb();
+    hasSupabase = true;
+    console.log("Supabase: connected");
+  } catch (e) {
+    console.log("Supabase: not available (standalone mode)");
+  }
 
-  const defaultToken = await ensureDefaultToken();
+  try {
+    await initNeo4j();
+    hasNeo4j = true;
+    console.log("Neo4j: connected");
+  } catch (e) {
+    console.log("Neo4j: not available (standalone mode)");
+  }
+
+  let defaultToken = "";
+  if (hasSupabase) {
+    defaultToken = await ensureDefaultToken();
+  } else {
+    // File-based token fallback for standalone mode
+    const tokenFile = path.join(STATE_DIR, "platform", "api-token");
+    const crypto = await import("crypto");
+    if (fs.existsSync(tokenFile)) {
+      defaultToken = fs.readFileSync(tokenFile, "utf-8").trim();
+    } else {
+      defaultToken = `cos_${crypto.randomBytes(24).toString("hex")}`;
+      fs.mkdirSync(path.dirname(tokenFile), { recursive: true });
+      fs.writeFileSync(tokenFile, defaultToken, { mode: 0o600 });
+    }
+  }
   console.log(`Default API token: ${defaultToken}`);
 
   const server = http.createServer(async (req, res) => {
@@ -306,7 +336,7 @@ async function main() {
 
     // Health (no auth)
     if (parts[0] === "v1" && parts[1] === "health") {
-      return json(res, 200, { status: "ok", version: "0.4.0", backends: { supabase: true, neo4j: true } });
+      return json(res, 200, { status: "ok", version: "0.4.0", backends: { supabase: hasSupabase, neo4j: hasNeo4j } });
     }
 
     // Portal (no auth for the page itself)
@@ -327,7 +357,17 @@ async function main() {
 
     // Auth for all API endpoints
     const authHeader = req.headers.authorization;
-    if (!authHeader?.startsWith("Bearer ") || !(await validateToken(authHeader.slice(7)))) {
+    const bearerToken = authHeader?.startsWith("Bearer ") ? authHeader.slice(7) : "";
+    let authed = false;
+    if (hasSupabase) {
+      authed = bearerToken ? await validateToken(bearerToken) : false;
+    } else {
+      // Standalone: check against file-based token
+      const tokenFile = path.join(STATE_DIR, "platform", "api-token");
+      const storedToken = fs.existsSync(tokenFile) ? fs.readFileSync(tokenFile, "utf-8").trim() : "";
+      authed = bearerToken === storedToken && storedToken !== "";
+    }
+    if (!authed) {
       return err(res, 401, "Unauthorized. Set Authorization: Bearer <token>");
     }
 

@@ -9,8 +9,8 @@ let driver: Driver;
 export async function initNeo4j(): Promise<void> {
   driver = neo4j.driver(NEO4J_URI, neo4j.auth.basic(NEO4J_USER, NEO4J_PASSWORD));
 
-  // Wait for connection
-  for (let i = 0; i < 30; i++) {
+  // Wait for connection (5 retries in standalone, fast fail)
+  for (let i = 0; i < 5; i++) {
     try {
       await driver.verifyConnectivity();
       console.log("Neo4j connected");

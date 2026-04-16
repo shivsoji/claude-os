@@ -7,9 +7,23 @@ const STATE_DIR = process.env.CLAUDE_OS_STATE || "/var/lib/claude-os";
 const SUPABASE_URL = process.env.SUPABASE_URL || "http://supabase-kong:8000";
 const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY || "";
 
-// Use service_role key for full access (server-side only)
-export const supabase: SupabaseClient = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY, {
-  auth: { persistSession: false, autoRefreshToken: false },
+// Lazy init — only create client if key is available
+let _supabase: SupabaseClient | null = null;
+export function getSupabase(): SupabaseClient | null {
+  if (!_supabase && SUPABASE_SERVICE_KEY) {
+    _supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY, {
+      auth: { persistSession: false, autoRefreshToken: false },
+    });
+  }
+  return _supabase;
+}
+// Compat alias
+export const supabase = new Proxy({} as SupabaseClient, {
+  get(_, prop) {
+    const client = getSupabase();
+    if (!client) throw new Error("Supabase not configured");
+    return (client as any)[prop];
+  }
 });
 
 // ID generation
@@ -62,10 +76,13 @@ export async function validateToken(token: string): Promise<boolean> {
 }
 
 // Wait for Supabase to be ready
-export async function waitForDb(maxRetries = 30): Promise<void> {
+export async function waitForDb(maxRetries = 10): Promise<void> {
+  const client = getSupabase();
+  if (!client) throw new Error("Supabase not configured (no SUPABASE_SERVICE_KEY)");
+
   for (let i = 0; i < maxRetries; i++) {
     try {
-      const { error } = await supabase.from("session_limits").select("key").limit(1);
+      const { error } = await client.from("session_limits").select("key").limit(1);
       if (!error) {
         console.log("Supabase connected");
         return;
