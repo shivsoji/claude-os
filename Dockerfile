@@ -119,6 +119,7 @@ COPY mcp-servers/agent-bus/package.json /opt/claude-os/mcp-src/agent-bus/package
 COPY mcp-servers/agent-bus/src/ /opt/claude-os/mcp-src/agent-bus/src/
 COPY mcp-servers/memory-graph/package.json /opt/claude-os/mcp-src/memory-graph/package.json
 COPY mcp-servers/memory-graph/src/ /opt/claude-os/mcp-src/memory-graph/src/
+COPY platform/portal/ /opt/claude-os/portal/
 
 # Shell agent CLAUDE.md (generate a static version)
 COPY modules/shell-agent/claude-md-shell.nix /opt/claude-os/claude-md-shell.nix
@@ -155,6 +156,8 @@ if [ ! -f "$STATE_DIR/platform/package.json" ]; then
     cp -r /opt/claude-os/platform-src/* $STATE_DIR/platform/ 2>/dev/null || true
     cp -r /opt/claude-os/mcp-src/agent-bus/* $STATE_DIR/mcp-servers/agent-bus/ 2>/dev/null || true
     cp -r /opt/claude-os/mcp-src/memory-graph/* $STATE_DIR/mcp-servers/memory-graph/ 2>/dev/null || true
+    mkdir -p $STATE_DIR/platform/portal
+    cp -r /opt/claude-os/portal/* $STATE_DIR/platform/portal/ 2>/dev/null || true
     cd $STATE_DIR/platform && npm install --omit=dev 2>/dev/null || true
     chown -R claude:claude $STATE_DIR
 fi

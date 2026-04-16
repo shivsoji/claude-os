@@ -56,6 +56,10 @@
       install -m 644 ${../../platform/src/db/index.ts} "$SRC_DIR/db/index.ts"
       install -m 644 ${../../platform/src/engine/executor.ts} "$SRC_DIR/engine/executor.ts"
 
+      # Portal
+      mkdir -p "$PLATFORM_DIR/portal"
+      install -m 644 ${../../platform/portal/index.html} "$PLATFORM_DIR/portal/index.html"
+
       # Install dependencies
       cd "$PLATFORM_DIR"
       export PATH="/home/claude/.npm-global/bin:$PATH"

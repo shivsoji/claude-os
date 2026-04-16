@@ -367,7 +367,23 @@ const server = http.createServer(async (req, res) => {
     return json(res, 200, { status: "ok", version: "0.1.0" });
   }
 
-  // Auth required for all other endpoints
+  // Portal — serve static HTML (no auth for the page itself, API calls inside use token)
+  if (url.pathname === "/" || url.pathname === "/portal" || url.pathname === "/portal/") {
+    const portalPaths = [
+      path.join(import.meta.dirname, "..", "portal", "index.html"),
+      path.join(STATE_DIR, "platform", "portal", "index.html"),
+      "/opt/claude-os/portal/index.html",
+    ];
+    for (const p of portalPaths) {
+      if (fs.existsSync(p)) {
+        res.writeHead(200, { "Content-Type": "text/html", "Access-Control-Allow-Origin": "*" });
+        return res.end(fs.readFileSync(p, "utf-8"));
+      }
+    }
+    return error(res, 404, "Portal not found");
+  }
+
+  // Auth required for all API endpoints
   if (!authenticate(req)) {
     return error(res, 401, "Unauthorized. Set Authorization: Bearer <token>");
   }
@@ -389,7 +405,8 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(PORT, "0.0.0.0", () => {
-  console.log(`Claude-OS Platform API running on http://0.0.0.0:${PORT}`);
+  console.log(`Claude-OS Platform running on http://0.0.0.0:${PORT}`);
+  console.log(`  Portal:   http://localhost:${PORT}/`);
   console.log(`Endpoints:`);
   console.log(`  GET/POST  /v1/agents`);
   console.log(`  GET/POST  /v1/sessions`);

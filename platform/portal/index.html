@@ -1,0 +1,375 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Claude-OS</title>
+<style>
+:root {
+  --bg: #0a0a0f; --bg2: #12121a; --bg3: #1a1a25;
+  --fg: #e0e0e8; --fg2: #888898; --fg3: #555568;
+  --accent: #7c6cf0; --accent2: #5a4fd4;
+  --green: #4ade80; --red: #f87171; --yellow: #fbbf24; --blue: #60a5fa;
+  --border: #2a2a3a; --radius: 8px;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: -apple-system, 'Inter', system-ui, sans-serif; background: var(--bg); color: var(--fg); min-height: 100vh; }
+a { color: var(--accent); text-decoration: none; }
+
+/* Layout */
+.app { display: flex; min-height: 100vh; }
+nav { width: 220px; background: var(--bg2); border-right: 1px solid var(--border); padding: 16px 0; flex-shrink: 0; }
+nav .logo { padding: 0 20px 20px; font-size: 18px; font-weight: 700; color: var(--accent); border-bottom: 1px solid var(--border); margin-bottom: 8px; }
+nav .logo span { color: var(--fg2); font-weight: 400; font-size: 12px; display: block; margin-top: 2px; }
+nav a { display: block; padding: 10px 20px; color: var(--fg2); font-size: 14px; transition: all 0.15s; }
+nav a:hover, nav a.active { background: var(--bg3); color: var(--fg); border-left: 3px solid var(--accent); }
+main { flex: 1; padding: 24px 32px; overflow-y: auto; max-height: 100vh; }
+h1 { font-size: 22px; margin-bottom: 20px; }
+h2 { font-size: 16px; margin-bottom: 12px; color: var(--fg2); }
+
+/* Cards */
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 16px; margin-bottom: 24px; }
+.card { background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px; }
+.card .label { font-size: 12px; color: var(--fg2); text-transform: uppercase; letter-spacing: 0.5px; }
+.card .value { font-size: 28px; font-weight: 700; margin-top: 4px; }
+.card .sub { font-size: 12px; color: var(--fg3); margin-top: 4px; }
+.stat-green .value { color: var(--green); }
+.stat-blue .value { color: var(--blue); }
+.stat-yellow .value { color: var(--yellow); }
+.stat-accent .value { color: var(--accent); }
+
+/* Tables */
+table { width: 100%; border-collapse: collapse; background: var(--bg2); border-radius: var(--radius); overflow: hidden; margin-bottom: 24px; }
+th { text-align: left; padding: 10px 16px; background: var(--bg3); font-size: 12px; color: var(--fg2); text-transform: uppercase; letter-spacing: 0.5px; }
+td { padding: 10px 16px; border-top: 1px solid var(--border); font-size: 14px; }
+tr:hover td { background: var(--bg3); }
+
+/* Badges */
+.badge { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 11px; font-weight: 600; }
+.badge-green { background: #16532a; color: var(--green); }
+.badge-yellow { background: #533a16; color: var(--yellow); }
+.badge-red { background: #531616; color: var(--red); }
+.badge-blue { background: #163253; color: var(--blue); }
+.badge-gray { background: #2a2a3a; color: var(--fg2); }
+
+/* Buttons */
+.btn { padding: 8px 16px; border: none; border-radius: var(--radius); cursor: pointer; font-size: 14px; font-weight: 500; transition: all 0.15s; }
+.btn-primary { background: var(--accent); color: white; }
+.btn-primary:hover { background: var(--accent2); }
+.btn-sm { padding: 4px 10px; font-size: 12px; }
+.btn-danger { background: var(--red); color: white; }
+
+/* Forms */
+input, textarea, select { width: 100%; padding: 8px 12px; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); color: var(--fg); font-size: 14px; font-family: inherit; }
+textarea { min-height: 80px; resize: vertical; }
+label { display: block; font-size: 13px; color: var(--fg2); margin-bottom: 4px; margin-top: 12px; }
+.form-row { margin-bottom: 16px; }
+
+/* Chat */
+.chat { display: flex; flex-direction: column; height: calc(100vh - 120px); }
+.chat-messages { flex: 1; overflow-y: auto; padding: 16px 0; }
+.chat-msg { margin-bottom: 16px; max-width: 85%; }
+.chat-msg.user { margin-left: auto; }
+.chat-msg .bubble { padding: 10px 14px; border-radius: 12px; font-size: 14px; line-height: 1.5; white-space: pre-wrap; }
+.chat-msg.user .bubble { background: var(--accent); color: white; border-bottom-right-radius: 4px; }
+.chat-msg.agent .bubble { background: var(--bg2); border: 1px solid var(--border); border-bottom-left-radius: 4px; }
+.chat-msg.system .bubble { background: var(--bg3); color: var(--fg2); font-size: 12px; font-family: monospace; }
+.chat-msg .meta { font-size: 11px; color: var(--fg3); margin-top: 4px; }
+.chat-input { display: flex; gap: 8px; padding-top: 12px; border-top: 1px solid var(--border); }
+.chat-input input { flex: 1; }
+
+/* Signals */
+.signal { padding: 8px 12px; margin-bottom: 4px; border-radius: var(--radius); font-size: 13px; font-family: monospace; border-left: 3px solid var(--border); background: var(--bg2); }
+.signal.warning { border-left-color: var(--yellow); }
+.signal.critical { border-left-color: var(--red); }
+.signal.info { border-left-color: var(--blue); }
+
+/* Responsive */
+@media (max-width: 768px) { nav { width: 60px; } nav a span { display: none; } .grid { grid-template-columns: 1fr 1fr; } }
+</style>
+</head>
+<body>
+<div class="app">
+  <nav>
+    <div class="logo">Claude-OS <span>v0.3.0</span></div>
+    <a href="#/" class="active" data-page="dashboard">Dashboard</a>
+    <a href="#/agents" data-page="agents">Agents</a>
+    <a href="#/sessions" data-page="sessions">Sessions</a>
+    <a href="#/system" data-page="system">System</a>
+    <a href="#/memory" data-page="memory">Memory</a>
+  </nav>
+  <main id="content">Loading...</main>
+</div>
+
+<script>
+const API = window.location.origin;
+let TOKEN = localStorage.getItem('cos_token') || '';
+
+// API helper
+async function api(path, opts = {}) {
+  const res = await fetch(`${API}/v1${path}`, {
+    ...opts,
+    headers: { 'Authorization': `Bearer ${TOKEN}`, 'Content-Type': 'application/json', ...opts.headers },
+  });
+  if (res.status === 401) { promptToken(); return null; }
+  if (!res.ok) return null;
+  return res.json();
+}
+
+function promptToken() {
+  const t = prompt('Enter your Claude-OS API token (from: cat /var/lib/claude-os/platform/api-token)');
+  if (t) { TOKEN = t.trim(); localStorage.setItem('cos_token', TOKEN); location.reload(); }
+}
+
+// Router
+function navigate() {
+  const hash = location.hash || '#/';
+  const [page, ...rest] = hash.slice(2).split('/');
+  document.querySelectorAll('nav a').forEach(a => a.classList.toggle('active', a.dataset.page === (page || 'dashboard')));
+  render(page || 'dashboard', rest.join('/'));
+}
+window.addEventListener('hashchange', navigate);
+
+// Render pages
+async function render(page, param) {
+  const el = document.getElementById('content');
+  switch (page) {
+    case 'dashboard': return renderDashboard(el);
+    case 'agents': return param ? renderAgentDetail(el, param) : renderAgents(el);
+    case 'sessions': return param ? renderSession(el, param) : renderSessions(el);
+    case 'system': return renderSystem(el);
+    case 'memory': return renderMemory(el);
+    default: el.innerHTML = '<h1>Not Found</h1>';
+  }
+}
+
+// === DASHBOARD ===
+async function renderDashboard(el) {
+  el.innerHTML = '<h1>Dashboard</h1><div class="grid" id="stats">Loading...</div><h2>Recent Signals</h2><div id="signals">Loading...</div>';
+  const [genome, awareness, agents, sessions] = await Promise.all([
+    api('/system/genome'), api('/system/awareness'), api('/agents'), api('/sessions')
+  ]);
+  const g = genome || {}; const a = awareness?.status || {}; const res = a.resources || {};
+  document.getElementById('stats').innerHTML = `
+    <div class="card stat-green"><div class="label">System</div><div class="value">${a.health?.healthy !== false ? 'Healthy' : 'Degraded'}</div><div class="sub">Gen ${g.generation || 0}</div></div>
+    <div class="card stat-blue"><div class="label">CPU Load</div><div class="value">${res.cpu?.load_1m ?? '?'}</div><div class="sub">${res.cpu?.cores || '?'} cores</div></div>
+    <div class="card stat-yellow"><div class="label">Memory</div><div class="value">${res.memory?.used_pct ?? '?'}%</div><div class="sub">${Math.round((res.memory?.available_kb||0)/1024)}MB free</div></div>
+    <div class="card"><div class="label">Disk</div><div class="value">${res.disk?.root_used_pct ?? '?'}%</div></div>
+    <div class="card stat-accent"><div class="label">Agents</div><div class="value">${agents?.agents?.length || 0}</div><div class="sub">defined</div></div>
+    <div class="card stat-blue"><div class="label">Sessions</div><div class="value">${sessions?.sessions?.length || 0}</div><div class="sub">active</div></div>
+    <div class="card"><div class="label">Capabilities</div><div class="value">${g.capabilities?.length || 0}</div></div>
+    <div class="card"><div class="label">Memory Entities</div><div class="value">${a.memory?.entities ?? '?'}</div></div>
+  `;
+  const sigs = awareness?.recent_signals || [];
+  document.getElementById('signals').innerHTML = sigs.length ? sigs.slice(-10).reverse().map(s =>
+    `<div class="signal ${s.severity}">${s.ts?.slice(11,19)||''} [${s.severity}] ${s.source}/${s.type}: ${s.message}</div>`
+  ).join('') : '<div style="color:var(--fg3)">No recent signals</div>';
+  setTimeout(() => { if (location.hash === '#/' || location.hash === '') renderDashboard(el); }, 10000);
+}
+
+// === AGENTS ===
+async function renderAgents(el) {
+  const data = await api('/agents');
+  const agents = data?.agents || [];
+  el.innerHTML = `<h1>Agents <button class="btn btn-primary btn-sm" onclick="createAgent()">+ New Agent</button></h1>
+    <table><tr><th>Name</th><th>Model</th><th>Tools</th><th>Created</th><th></th></tr>
+    ${agents.map(a => `<tr style="cursor:pointer" onclick="location.hash='#/agents/${a.id}'">
+      <td><strong>${a.name}</strong><br><span style="color:var(--fg3);font-size:12px">${a.id}</span></td>
+      <td><span class="badge badge-blue">${a.model_provider}/${a.model_id}</span></td>
+      <td>${(JSON.parse(a.tools||'[]')).length} tools</td>
+      <td style="color:var(--fg2);font-size:13px">${a.created_at?.slice(0,16)}</td>
+      <td><button class="btn btn-sm btn-danger" onclick="event.stopPropagation();deleteAgent('${a.id}')">Delete</button></td>
+    </tr>`).join('')}
+    ${agents.length === 0 ? '<tr><td colspan="5" style="color:var(--fg3);text-align:center">No agents yet. Create one!</td></tr>' : ''}
+    </table>`;
+}
+
+async function createAgent() {
+  const name = prompt('Agent name:');
+  if (!name) return;
+  const agent = await api('/agents', { method: 'POST', body: JSON.stringify({
+    name, system_prompt: 'You are a helpful assistant. Be concise.',
+    model: { provider: 'ollama', id: 'gemma4:31b-cloud' },
+    tools: [{ type: 'builtin', name: 'bash' }]
+  })});
+  if (agent) location.hash = `#/agents/${agent.id}`;
+}
+
+async function deleteAgent(id) {
+  if (!confirm('Delete this agent?')) return;
+  await api(`/agents/${id}`, { method: 'DELETE' });
+  renderAgents(document.getElementById('content'));
+}
+
+async function renderAgentDetail(el, id) {
+  const agent = await api(`/agents/${id}`);
+  if (!agent) return el.innerHTML = '<h1>Agent not found</h1>';
+  el.innerHTML = `<h1>${agent.name} <button class="btn btn-primary btn-sm" onclick="startSession('${id}')">Start Session</button></h1>
+    <div class="grid">
+      <div class="card"><div class="label">ID</div><div style="font-size:12px;color:var(--fg2);margin-top:4px;font-family:monospace">${agent.id}</div></div>
+      <div class="card"><div class="label">Model</div><div class="value" style="font-size:16px">${agent.model_provider}/${agent.model_id}</div></div>
+      <div class="card"><div class="label">Version</div><div class="value">${agent.version}</div></div>
+    </div>
+    <h2>System Prompt</h2>
+    <div class="card"><pre style="white-space:pre-wrap;font-size:13px">${agent.system_prompt || '(none)'}</pre></div>
+    <h2>Tools</h2>
+    <div class="card"><pre style="font-size:13px">${JSON.stringify(JSON.parse(agent.tools||'[]'), null, 2)}</pre></div>
+    <h2>Skills</h2>
+    <div class="card">${(JSON.parse(agent.skills||'[]')).map(s => `<span class="badge badge-gray">${s}</span> `).join('') || 'None'}</div>`;
+}
+
+async function startSession(agentId) {
+  const title = prompt('Session title:', 'New Session');
+  if (!title) return;
+  const sess = await api('/sessions', { method: 'POST', body: JSON.stringify({ agent_id: agentId, title }) });
+  if (sess) location.hash = `#/sessions/${sess.id}`;
+}
+
+// === SESSIONS ===
+async function renderSessions(el) {
+  const data = await api('/sessions');
+  const sessions = data?.sessions || [];
+  el.innerHTML = `<h1>Sessions</h1>
+    <table><tr><th>Title</th><th>Agent</th><th>Status</th><th>Turns</th><th>Created</th><th></th></tr>
+    ${sessions.map(s => `<tr style="cursor:pointer" onclick="location.hash='#/sessions/${s.id}'">
+      <td><strong>${s.title}</strong><br><span style="color:var(--fg3);font-size:12px">${s.id}</span></td>
+      <td style="font-size:13px">${s.agent_id?.slice(0,20)}</td>
+      <td><span class="badge badge-${s.status==='running'?'green':s.status==='idle'?'blue':'gray'}">${s.status}</span></td>
+      <td>${s.turns || 0}</td>
+      <td style="color:var(--fg2);font-size:13px">${s.created_at?.slice(0,16)}</td>
+      <td><button class="btn btn-sm" onclick="event.stopPropagation();archiveSession('${s.id}')">Archive</button></td>
+    </tr>`).join('')}
+    ${sessions.length === 0 ? '<tr><td colspan="6" style="color:var(--fg3);text-align:center">No active sessions</td></tr>' : ''}
+    </table>`;
+}
+
+async function archiveSession(id) {
+  await api(`/sessions/${id}/archive`, { method: 'POST' });
+  renderSessions(document.getElementById('content'));
+}
+
+// === SESSION CHAT ===
+async function renderSession(el, id) {
+  const session = await api(`/sessions/${id}`);
+  if (!session) return el.innerHTML = '<h1>Session not found</h1>';
+  el.innerHTML = `<h1>${session.title} <span class="badge badge-${session.status==='running'?'green':'blue'}">${session.status}</span></h1>
+    <div class="chat">
+      <div class="chat-messages" id="chat-msgs"></div>
+      <div class="chat-input">
+        <input type="text" id="chat-in" placeholder="Send a message..." onkeydown="if(event.key==='Enter')sendMsg('${id}')">
+        <button class="btn btn-primary" onclick="sendMsg('${id}')">Send</button>
+      </div>
+    </div>`;
+  loadEvents(id);
+  // SSE for real-time updates
+  const es = new EventSource(`${API}/v1/sessions/${id}/events?token=${TOKEN}`);
+  es.onmessage = (e) => { appendEvent(JSON.parse(e.data)); };
+  window._currentSSE = es;
+}
+
+async function loadEvents(sessionId) {
+  const data = await api(`/sessions/${sessionId}/events`);
+  const msgs = document.getElementById('chat-msgs');
+  if (!msgs) return;
+  msgs.innerHTML = '';
+  (data?.events || []).forEach(e => appendEvent(e));
+}
+
+function appendEvent(evt) {
+  const msgs = document.getElementById('chat-msgs');
+  if (!msgs) return;
+  const parsed = typeof evt.content === 'string' ? (() => { try { return JSON.parse(evt.content); } catch { return { content: evt.content }; } })() : evt;
+  const content = parsed.content || parsed.text || parsed.message || JSON.stringify(parsed);
+  const role = evt.role || 'system';
+  const type = evt.type || 'message';
+
+  const div = document.createElement('div');
+  div.className = `chat-msg ${role}`;
+
+  if (type === 'tool_call') {
+    const tc = typeof content === 'string' ? (() => { try { return JSON.parse(content); } catch { return {}; } })() : content;
+    div.className = 'chat-msg system';
+    div.innerHTML = `<div class="bubble">Tool: ${tc.name || '?'}\n${JSON.stringify(tc.input || {}, null, 2)}</div><div class="meta">${evt.processed_at?.slice(11,19)||''}</div>`;
+  } else if (type === 'tool_result') {
+    div.className = 'chat-msg system';
+    div.innerHTML = `<div class="bubble">${String(content).slice(0, 500)}</div><div class="meta">tool result</div>`;
+  } else {
+    div.innerHTML = `<div class="bubble">${escHtml(String(content))}</div><div class="meta">${role} ${evt.processed_at?.slice(11,19)||''}</div>`;
+  }
+  msgs.appendChild(div);
+  msgs.scrollTop = msgs.scrollHeight;
+}
+
+function escHtml(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+async function sendMsg(sessionId) {
+  const input = document.getElementById('chat-in');
+  const msg = input.value.trim();
+  if (!msg) return;
+  input.value = '';
+  input.disabled = true;
+  appendEvent({ type: 'message', role: 'user', content: msg, processed_at: new Date().toISOString() });
+  await api(`/sessions/${sessionId}/messages`, { method: 'POST', body: JSON.stringify({ content: msg }) });
+  input.disabled = false;
+  input.focus();
+  loadEvents(sessionId);
+}
+
+// === SYSTEM ===
+async function renderSystem(el) {
+  const [genome, evolution, awareness] = await Promise.all([
+    api('/system/genome'), api('/system/evolution'), api('/system/awareness')
+  ]);
+  const g = genome || {}; const ev = evolution || {};
+  el.innerHTML = `<h1>System</h1>
+    <h2>Genome</h2>
+    <div class="grid">
+      <div class="card stat-accent"><div class="label">Generation</div><div class="value">${g.generation || 0}</div><div class="sub">Born: ${g.born?.slice(0,10)||'?'}</div></div>
+      <div class="card"><div class="label">Capabilities</div><div class="value">${g.capabilities?.length||0}</div></div>
+      <div class="card"><div class="label">Skills</div><div class="value">${g.skills?.length||0}</div></div>
+      <div class="card"><div class="label">User Packages</div><div class="value">${g.packages?.user?.length||0}</div></div>
+    </div>
+    <h2>Capabilities</h2>
+    <div class="card">${(g.capabilities||[]).map(c => `<span class="badge badge-blue" style="margin:2px">${c}</span>`).join(' ') || 'None'}</div>
+    <h2>Fitness</h2>
+    <div class="grid">
+      ${Object.entries(g.fitness||{}).map(([k,v]) => `<div class="card"><div class="label">${k.replace(/_/g,' ')}</div><div class="value">${v}</div></div>`).join('')}
+    </div>
+    <h2>Evolution Log (last 10)</h2>
+    <table><tr><th>Time</th><th>Type</th><th>Description</th></tr>
+    ${(ev.mutations||[]).slice(-10).reverse().map(m => `<tr><td style="font-size:12px">${m.timestamp?.slice(0,19)}</td><td><span class="badge badge-gray">${m.type}</span></td><td>${m.description}</td></tr>`).join('')}
+    ${(ev.mutations||[]).length===0?'<tr><td colspan="3" style="color:var(--fg3)">No mutations yet</td></tr>':''}
+    </table>`;
+}
+
+// === MEMORY ===
+async function renderMemory(el) {
+  el.innerHTML = `<h1>Memory Graph</h1>
+    <div class="form-row" style="display:flex;gap:8px">
+      <input type="text" id="mem-q" placeholder="Search memories..." onkeydown="if(event.key==='Enter')searchMemory()">
+      <button class="btn btn-primary" onclick="searchMemory()">Search</button>
+    </div>
+    <div id="mem-results"></div>
+    <div id="mem-stats"></div>`;
+  const stats = await api('/memory/stats');
+  document.getElementById('mem-stats').innerHTML = `<h2>Stats</h2><div class="card"><pre style="font-size:13px;white-space:pre-wrap">${typeof stats?.stats === 'string' ? stats.stats : JSON.stringify(stats, null, 2)}</pre></div>`;
+}
+
+async function searchMemory() {
+  const q = document.getElementById('mem-q').value.trim();
+  if (!q) return;
+  const data = await api(`/memory/search?q=${encodeURIComponent(q)}`);
+  const results = data?.results || [];
+  document.getElementById('mem-results').innerHTML = Array.isArray(results)
+    ? results.map(r => `<div class="card" style="margin-bottom:8px"><strong>#${r.id} [${r.type}] ${r.name}</strong><br><span style="color:var(--fg2);font-size:13px">${r.content_preview || r.content || ''}</span></div>`).join('')
+    : `<div class="card"><pre style="font-size:13px;white-space:pre-wrap">${typeof results === 'string' ? results : JSON.stringify(results, null, 2)}</pre></div>`;
+}
+
+// Init
+window.addEventListener('load', () => {
+  if (!TOKEN) promptToken();
+  else navigate();
+});
+</script>
+</body>
+</html>
