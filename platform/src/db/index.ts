@@ -1,30 +1,54 @@
-import { createClient, type SupabaseClient } from "@supabase/supabase-js";
+import pg from "pg";
 import * as crypto from "crypto";
 import * as fs from "fs";
 import * as path from "path";
 
 const STATE_DIR = process.env.CLAUDE_OS_STATE || "/var/lib/claude-os";
-const SUPABASE_URL = process.env.SUPABASE_URL || "http://supabase-kong:8000";
-const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY || "";
+const DB_URL = process.env.SUPABASE_DB_URL || "";
 
-// Lazy init — only create client if key is available
-let _supabase: SupabaseClient | null = null;
-export function getSupabase(): SupabaseClient | null {
-  if (!_supabase && SUPABASE_SERVICE_KEY) {
-    _supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY, {
-      auth: { persistSession: false, autoRefreshToken: false },
-    });
-  }
-  return _supabase;
+let pool: pg.Pool | null = null;
+
+export function getPool(): pg.Pool | null {
+  return pool;
 }
-// Compat alias
-export const supabase = new Proxy({} as SupabaseClient, {
-  get(_, prop) {
-    const client = getSupabase();
-    if (!client) throw new Error("Supabase not configured");
-    return (client as any)[prop];
+
+// Initialize Postgres connection
+export async function initDb(maxRetries = 10): Promise<void> {
+  if (!DB_URL) throw new Error("SUPABASE_DB_URL not set");
+
+  pool = new pg.Pool({ connectionString: DB_URL, max: 10 });
+
+  for (let i = 0; i < maxRetries; i++) {
+    try {
+      const client = await pool.connect();
+      await client.query("SELECT 1");
+      client.release();
+      console.log("Postgres connected");
+      return;
+    } catch (e: any) {
+      console.log(`Waiting for Postgres... (${i + 1}/${maxRetries}): ${e.message?.slice(0, 80)}`);
+      await new Promise((r) => setTimeout(r, 2000));
+    }
   }
-});
+  throw new Error("Could not connect to Postgres");
+}
+
+// Simple query helper
+export async function query(sql: string, params: any[] = []): Promise<any[]> {
+  if (!pool) return [];
+  const result = await pool.query(sql, params);
+  return result.rows;
+}
+
+export async function queryOne(sql: string, params: any[] = []): Promise<any | null> {
+  const rows = await query(sql, params);
+  return rows[0] || null;
+}
+
+export async function exec(sql: string, params: any[] = []): Promise<void> {
+  if (!pool) return;
+  await pool.query(sql, params);
+}
 
 // ID generation
 export function genId(prefix: string): string {
@@ -33,65 +57,28 @@ export function genId(prefix: string): string {
 
 // Ensure a default API token exists
 export async function ensureDefaultToken(): Promise<string> {
-  const { data } = await supabase
-    .from("api_tokens")
-    .select("token")
-    .eq("name", "default")
-    .limit(1)
-    .single();
-
-  if (data?.token) return data.token;
+  const row = await queryOne("SELECT token FROM api_tokens WHERE name = $1 LIMIT 1", ["default"]);
+  if (row) return row.token;
 
   const token = `cos_${crypto.randomBytes(24).toString("hex")}`;
-  await supabase.from("api_tokens").insert({
-    token,
-    name: "default",
-    scopes: ["*"],
-  });
+  await exec("INSERT INTO api_tokens (token, name, scopes) VALUES ($1, $2, $3)", [token, "default", JSON.stringify(["*"])]);
 
-  // Write to file for CLI access
-  const tokenDir = path.join(STATE_DIR, "platform");
-  fs.mkdirSync(tokenDir, { recursive: true });
-  fs.writeFileSync(path.join(tokenDir, "api-token"), token, { mode: 0o600 });
+  const tokenFile = path.join(STATE_DIR, "platform", "api-token");
+  fs.mkdirSync(path.dirname(tokenFile), { recursive: true });
+  fs.writeFileSync(tokenFile, token, { mode: 0o600 });
 
   return token;
 }
 
 // Auth check
 export async function validateToken(token: string): Promise<boolean> {
-  const { data } = await supabase
-    .from("api_tokens")
-    .select("token")
-    .eq("token", token)
-    .limit(1)
-    .single();
-
-  if (data) {
-    await supabase
-      .from("api_tokens")
-      .update({ last_used: new Date().toISOString() })
-      .eq("token", token);
+  const row = await queryOne("SELECT token FROM api_tokens WHERE token = $1", [token]);
+  if (row) {
+    await exec("UPDATE api_tokens SET last_used = NOW() WHERE token = $1", [token]);
   }
-  return !!data;
+  return !!row;
 }
 
-// Wait for Supabase to be ready
-export async function waitForDb(maxRetries = 10): Promise<void> {
-  const client = getSupabase();
-  if (!client) throw new Error("Supabase not configured (no SUPABASE_SERVICE_KEY)");
-
-  for (let i = 0; i < maxRetries; i++) {
-    try {
-      const { error } = await client.from("session_limits").select("key").limit(1);
-      if (!error) {
-        console.log("Supabase connected");
-        return;
-      }
-      console.log(`Waiting for Supabase... (${i + 1}/${maxRetries}): ${error.message}`);
-    } catch (e) {
-      console.log(`Waiting for Supabase... (${i + 1}/${maxRetries})`);
-    }
-    await new Promise((r) => setTimeout(r, 2000));
-  }
-  throw new Error("Could not connect to Supabase");
+export async function closeDb(): Promise<void> {
+  if (pool) await pool.end();
 }

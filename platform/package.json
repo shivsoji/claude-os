@@ -10,7 +10,7 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.52.0",
-    "@supabase/supabase-js": "^2.49.0",
+    "pg": "^8.13.0",
     "neo4j-driver": "^5.27.0"
   },
   "devDependencies": {

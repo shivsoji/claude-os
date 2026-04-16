@@ -1,8 +1,8 @@
 -- Claude-OS Platform Schema (Supabase/Postgres)
--- Replaces the SQLite platform.sqlite
+-- This runs after Supabase's own init scripts create the roles
 
 -- ============================================
--- Agents — configurable AI agent definitions
+-- Agents
 -- ============================================
 CREATE TABLE IF NOT EXISTS public.agents (
     id          TEXT PRIMARY KEY,
@@ -24,9 +24,6 @@ CREATE TABLE IF NOT EXISTS public.agents (
     updated_at  TIMESTAMPTZ DEFAULT NOW()
 );
 
--- ============================================
--- Agent versions — snapshot history
--- ============================================
 CREATE TABLE IF NOT EXISTS public.agent_versions (
     agent_id    TEXT NOT NULL REFERENCES public.agents(id) ON DELETE CASCADE,
     version     INTEGER NOT NULL,
@@ -36,7 +33,7 @@ CREATE TABLE IF NOT EXISTS public.agent_versions (
 );
 
 -- ============================================
--- Sessions — execution contexts
+-- Sessions
 -- ============================================
 CREATE TABLE IF NOT EXISTS public.sessions (
     id              TEXT PRIMARY KEY,
@@ -58,22 +55,17 @@ CREATE TABLE IF NOT EXISTS public.sessions (
     archived_at     TIMESTAMPTZ DEFAULT NULL
 );
 
-CREATE INDEX IF NOT EXISTS idx_sessions_agent ON public.sessions(agent_id);
-CREATE INDEX IF NOT EXISTS idx_sessions_status ON public.sessions(status);
-
 -- ============================================
--- Events — message and tool interaction stream
+-- Events
 -- ============================================
 CREATE TABLE IF NOT EXISTS public.events (
     id          TEXT PRIMARY KEY,
     session_id  TEXT NOT NULL REFERENCES public.sessions(id) ON DELETE CASCADE,
-    type        TEXT NOT NULL,       -- message | tool_call | tool_result | status
-    role        TEXT NOT NULL,       -- user | agent | system
+    type        TEXT NOT NULL,
+    role        TEXT NOT NULL,
     content     JSONB NOT NULL,
     processed_at TIMESTAMPTZ DEFAULT NOW()
 );
-
-CREATE INDEX IF NOT EXISTS idx_events_session ON public.events(session_id, processed_at);
 
 -- ============================================
 -- API tokens
@@ -88,7 +80,7 @@ CREATE TABLE IF NOT EXISTS public.api_tokens (
 );
 
 -- ============================================
--- Session limits / config
+-- Session limits
 -- ============================================
 CREATE TABLE IF NOT EXISTS public.session_limits (
     key   TEXT PRIMARY KEY,
@@ -103,7 +95,7 @@ INSERT INTO public.session_limits (key, value) VALUES
 ON CONFLICT DO NOTHING;
 
 -- ============================================
--- System state (genome, evolution, awareness)
+-- System state
 -- ============================================
 CREATE TABLE IF NOT EXISTS public.system_state (
     key     TEXT PRIMARY KEY,
@@ -111,36 +103,20 @@ CREATE TABLE IF NOT EXISTS public.system_state (
     updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 
--- ============================================
--- Enable Realtime on events table
--- ============================================
-ALTER PUBLICATION supabase_realtime ADD TABLE public.events;
-
--- ============================================
--- Row Level Security (basic policies)
--- ============================================
-ALTER TABLE public.agents ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.sessions ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.events ENABLE ROW LEVEL SECURITY;
-
--- Allow service_role full access
-CREATE POLICY "service_role_all" ON public.agents FOR ALL USING (true);
-CREATE POLICY "service_role_all" ON public.sessions FOR ALL USING (true);
-CREATE POLICY "service_role_all" ON public.events FOR ALL USING (true);
-
--- ============================================
--- Auto-update updated_at timestamps
--- ============================================
+-- Auto-update timestamps
 CREATE OR REPLACE FUNCTION update_updated_at()
 RETURNS TRIGGER AS $$
-BEGIN
-    NEW.updated_at = NOW();
-    RETURN NEW;
-END;
+BEGIN NEW.updated_at = NOW(); RETURN NEW; END;
 $$ LANGUAGE plpgsql;
 
-CREATE TRIGGER agents_updated_at BEFORE UPDATE ON public.agents
+DO $$ BEGIN
+  CREATE TRIGGER agents_updated_at BEFORE UPDATE ON public.agents
     FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
 
-CREATE TRIGGER sessions_updated_at BEFORE UPDATE ON public.sessions
+DO $$ BEGIN
+  CREATE TRIGGER sessions_updated_at BEFORE UPDATE ON public.sessions
     FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;

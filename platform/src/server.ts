@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * Claude-OS Managed Agents Platform
- * Powered by Supabase (Postgres + Auth + Realtime) + Neo4j (Graph Memory)
+ * Postgres + Neo4j + Ollama
  *
  * Portal:  http://localhost:8420/
  * API:     http://localhost:8420/v1/...
@@ -11,391 +11,246 @@ import * as http from "http";
 import * as fs from "fs";
 import * as path from "path";
 import { execSync } from "child_process";
-import { supabase, genId, ensureDefaultToken, validateToken, waitForDb } from "./db/index.ts";
+import { initDb, query, queryOne, exec, genId, ensureDefaultToken, validateToken, closeDb } from "./db/index.ts";
 import { graph, initNeo4j, closeNeo4j } from "./db/neo4j.ts";
 import { executeMessage, subscribeSession } from "./engine/executor.ts";
 
 const PORT = parseInt(process.env.PLATFORM_PORT || "8420");
 const STATE_DIR = process.env.CLAUDE_OS_STATE || "/var/lib/claude-os";
 
-// ============================================
-// Request helpers
-// ============================================
-async function readBody(req: http.IncomingMessage): Promise<string> {
-  return new Promise((resolve) => {
-    let data = "";
-    req.on("data", (chunk: any) => (data += chunk));
-    req.on("end", () => resolve(data));
-  });
-}
+let hasDb = false, hasNeo4j = false;
 
+// ═══ Helpers ═══
+async function readBody(req: http.IncomingMessage): Promise<string> {
+  return new Promise(r => { let d = ""; req.on("data", c => d += c); req.on("end", () => r(d)); });
+}
 function json(res: http.ServerResponse, status: number, data: any) {
   res.writeHead(status, { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" });
   res.end(JSON.stringify(data));
 }
+function err(res: http.ServerResponse, status: number, msg: string) { json(res, status, { error: msg }); }
+function esc(s: string) { return s.replace(/</g, "&lt;"); }
 
-function err(res: http.ServerResponse, status: number, message: string) {
-  json(res, status, { error: message });
-}
-
-// ============================================
-// Agents
-// ============================================
+// ═══ Agents ═══
 async function handleAgents(req: http.IncomingMessage, res: http.ServerResponse, parts: string[]) {
-  const agentId = parts[3];
-
-  if (req.method === "GET" && !agentId) {
-    const { data } = await supabase.from("agents").select("*").order("created_at", { ascending: false });
-    return json(res, 200, { agents: data || [] });
-
-  } else if (req.method === "GET" && agentId) {
-    const { data } = await supabase.from("agents").select("*").eq("id", agentId).single();
-    if (!data) return err(res, 404, "Agent not found");
-    return json(res, 200, data);
-
-  } else if (req.method === "POST" && !agentId) {
-    const body = JSON.parse(await readBody(req));
-    const id = genId("agent");
-    const agent = {
-      id,
-      name: body.name || "Untitled Agent",
-      description: body.description || "",
-      system_prompt: body.system_prompt || "You are a helpful assistant.",
-      model_provider: body.model?.provider || "ollama",
-      model_id: body.model?.id || "gemma4:31b-cloud",
-      model_fallback: body.model?.fallback || "ollama",
-      tools: body.tools || [],
-      skills: body.skills || [],
-      composition: body.composition || null,
-      packages: body.packages || [],
-      env_vars: body.env_vars || {},
-      max_turns: body.max_turns || 50,
-      max_tokens: body.max_tokens || 16384,
-    };
-    await supabase.from("agents").insert(agent);
-    await supabase.from("agent_versions").insert({ agent_id: id, version: 1, snapshot: agent });
+  const id = parts[3];
+  if (req.method === "GET" && !id) {
+    return json(res, 200, { agents: hasDb ? await query("SELECT * FROM agents ORDER BY created_at DESC") : [] });
+  }
+  if (req.method === "GET" && id) {
+    const a = hasDb ? await queryOne("SELECT * FROM agents WHERE id = $1", [id]) : null;
+    return a ? json(res, 200, a) : err(res, 404, "Agent not found");
+  }
+  if (req.method === "POST" && !id) {
+    if (!hasDb) return err(res, 503, "Database not available");
+    const b = JSON.parse(await readBody(req));
+    const aid = genId("agent");
+    await exec(`INSERT INTO agents (id,name,description,system_prompt,model_provider,model_id,model_fallback,tools,skills,composition,packages,env_vars,max_turns,max_tokens)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
+      [aid, b.name||"Untitled", b.description||"", b.system_prompt||"You are a helpful assistant.",
+       b.model?.provider||"ollama", b.model?.id||"gemma4:31b-cloud", b.model?.fallback||"ollama",
+       JSON.stringify(b.tools||[]), JSON.stringify(b.skills||[]), b.composition||null,
+       JSON.stringify(b.packages||[]), JSON.stringify(b.env_vars||{}), b.max_turns||50, b.max_tokens||16384]);
+    const agent = await queryOne("SELECT * FROM agents WHERE id = $1", [aid]);
+    await exec("INSERT INTO agent_versions (agent_id,version,snapshot) VALUES ($1,1,$2)", [aid, JSON.stringify(agent)]);
     return json(res, 201, agent);
-
-  } else if (req.method === "DELETE" && agentId) {
-    const { data: active } = await supabase.from("sessions").select("id").eq("agent_id", agentId).neq("status", "archived");
-    if (active && active.length > 0) return err(res, 409, `Agent has ${active.length} active sessions`);
-    await supabase.from("agents").delete().eq("id", agentId);
-    return json(res, 200, { deleted: agentId });
+  }
+  if (req.method === "DELETE" && id) {
+    if (!hasDb) return err(res, 503, "Database not available");
+    const active = await query("SELECT id FROM sessions WHERE agent_id=$1 AND status!='archived'", [id]);
+    if (active.length > 0) return err(res, 409, `Agent has ${active.length} active sessions`);
+    await exec("DELETE FROM agents WHERE id=$1", [id]);
+    return json(res, 200, { deleted: id });
   }
   err(res, 405, "Method not allowed");
 }
 
-// ============================================
-// Sessions
-// ============================================
+// ═══ Sessions ═══
 async function handleSessions(req: http.IncomingMessage, res: http.ServerResponse, parts: string[]) {
-  const sessionId = parts[3];
-  const sub = parts[4];
-
-  if (req.method === "GET" && !sessionId) {
-    const { data } = await supabase.from("sessions").select("*").neq("status", "archived").order("created_at", { ascending: false }).limit(50);
-    return json(res, 200, { sessions: data || [] });
-
-  } else if (req.method === "GET" && sessionId && !sub) {
-    const { data } = await supabase.from("sessions").select("*").eq("id", sessionId).single();
-    if (!data) return err(res, 404, "Session not found");
-    return json(res, 200, data);
-
-  } else if (req.method === "POST" && !sessionId) {
-    const body = JSON.parse(await readBody(req));
-    const { data: agent } = await supabase.from("agents").select("*").eq("id", body.agent_id).single();
+  const sid = parts[3], sub = parts[4];
+  if (req.method === "GET" && !sid) {
+    return json(res, 200, { sessions: hasDb ? await query("SELECT * FROM sessions WHERE status!='archived' ORDER BY created_at DESC LIMIT 50") : [] });
+  }
+  if (req.method === "GET" && sid && !sub) {
+    const s = hasDb ? await queryOne("SELECT * FROM sessions WHERE id=$1", [sid]) : null;
+    return s ? json(res, 200, s) : err(res, 404, "Session not found");
+  }
+  if (req.method === "POST" && !sid) {
+    if (!hasDb) return err(res, 503, "Database not available");
+    const b = JSON.parse(await readBody(req));
+    const agent = await queryOne("SELECT * FROM agents WHERE id=$1", [b.agent_id]);
     if (!agent) return err(res, 404, "Agent not found");
-
-    const { data: limits } = await supabase.from("session_limits").select("value").eq("key", "max_concurrent").single();
-    const maxConcurrent = parseInt(limits?.value || "10");
-    const { count } = await supabase.from("sessions").select("id", { count: "exact", head: true }).neq("status", "archived");
-    if ((count || 0) >= maxConcurrent) return err(res, 429, `Max concurrent sessions (${maxConcurrent}) reached`);
-
+    const limit = (await queryOne("SELECT value FROM session_limits WHERE key='max_concurrent'"))?.value || "10";
+    const count = (await queryOne("SELECT count(*) as n FROM sessions WHERE status!='archived'"))?.n || 0;
+    if (parseInt(count) >= parseInt(limit)) return err(res, 429, `Max sessions (${limit}) reached`);
     const id = genId("sess");
-    const session = {
-      id,
-      agent_id: agent.id,
-      agent_version: agent.version,
-      agent_snapshot: agent,
-      title: body.title || "Untitled Session",
-      status: "idle",
-      metadata: body.metadata || {},
-      resources: body.resources || [],
-    };
-    await supabase.from("sessions").insert(session);
-    return json(res, 201, session);
-
-  } else if (req.method === "POST" && sessionId && sub === "messages") {
-    const body = JSON.parse(await readBody(req));
-    const message = body.content || body.message || body.text;
-    if (!message) return err(res, 400, "Missing message content");
+    await exec(`INSERT INTO sessions (id,agent_id,agent_version,agent_snapshot,title,status,metadata,resources)
+      VALUES ($1,$2,$3,$4,$5,'idle',$6,$7)`,
+      [id, agent.id, agent.version, JSON.stringify(agent), b.title||"Untitled", JSON.stringify(b.metadata||{}), JSON.stringify(b.resources||[])]);
+    return json(res, 201, await queryOne("SELECT * FROM sessions WHERE id=$1", [id]));
+  }
+  if (req.method === "POST" && sid && sub === "messages") {
+    const b = JSON.parse(await readBody(req));
+    const msg = b.content || b.message || b.text;
+    if (!msg) return err(res, 400, "Missing content");
     try {
-      await executeMessage(sessionId, message);
-      const { data: events } = await supabase.from("events").select("*").eq("session_id", sessionId).order("processed_at", { ascending: false }).limit(10);
-      return json(res, 200, { events: (events || []).reverse() });
-    } catch (e: any) {
-      return err(res, 500, e.message);
-    }
-
-  } else if (req.method === "GET" && sessionId && sub === "events") {
+      await executeMessage(sid, msg);
+      const events = hasDb ? await query("SELECT * FROM events WHERE session_id=$1 ORDER BY processed_at DESC LIMIT 10", [sid]) : [];
+      return json(res, 200, { events: events.reverse() });
+    } catch (e: any) { return err(res, 500, e.message); }
+  }
+  if (req.method === "GET" && sid && sub === "events") {
     if (req.headers.accept?.includes("text/event-stream")) {
-      res.writeHead(200, {
-        "Content-Type": "text/event-stream",
-        "Cache-Control": "no-cache",
-        "Connection": "keep-alive",
-        "Access-Control-Allow-Origin": "*",
-      });
-      const { data: existing } = await supabase.from("events").select("*").eq("session_id", sessionId).order("processed_at");
-      for (const e of existing || []) res.write(`data: ${JSON.stringify(e)}\n\n`);
-
-      // Subscribe to new events via Supabase Realtime
-      const channel = supabase.channel(`session-${sessionId}`).on(
-        "postgres_changes",
-        { event: "INSERT", schema: "public", table: "events", filter: `session_id=eq.${sessionId}` },
-        (payload: any) => { res.write(`data: ${JSON.stringify(payload.new)}\n\n`); }
-      ).subscribe();
-
-      // Also subscribe to in-process events
-      const unsub = subscribeSession(sessionId, (event: any) => {
-        res.write(`data: ${JSON.stringify(event)}\n\n`);
-      });
-
-      req.on("close", () => { channel.unsubscribe(); unsub(); });
-    } else {
-      const { data } = await supabase.from("events").select("*").eq("session_id", sessionId).order("processed_at");
-      return json(res, 200, { events: data || [] });
+      res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", "Connection": "keep-alive", "Access-Control-Allow-Origin": "*" });
+      if (hasDb) {
+        const existing = await query("SELECT * FROM events WHERE session_id=$1 ORDER BY processed_at", [sid]);
+        for (const e of existing) res.write(`data: ${JSON.stringify(e)}\n\n`);
+      }
+      const unsub = subscribeSession(sid, (event: any) => { res.write(`data: ${JSON.stringify(event)}\n\n`); });
+      req.on("close", unsub);
+      return;
     }
-
-  } else if (req.method === "POST" && sessionId && sub === "archive") {
-    await supabase.from("sessions").update({ status: "archived", archived_at: new Date().toISOString() }).eq("id", sessionId);
-    return json(res, 200, { archived: sessionId });
-
-  } else if (req.method === "DELETE" && sessionId) {
-    await supabase.from("sessions").delete().eq("id", sessionId);
-    return json(res, 200, { deleted: sessionId });
+    return json(res, 200, { events: hasDb ? await query("SELECT * FROM events WHERE session_id=$1 ORDER BY processed_at", [sid]) : [] });
+  }
+  if (req.method === "POST" && sid && sub === "archive") {
+    if (hasDb) await exec("UPDATE sessions SET status='archived', archived_at=NOW() WHERE id=$1", [sid]);
+    return json(res, 200, { archived: sid });
+  }
+  if (req.method === "DELETE" && sid) {
+    if (hasDb) await exec("DELETE FROM sessions WHERE id=$1", [sid]);
+    return json(res, 200, { deleted: sid });
   }
   err(res, 405, "Method not allowed");
 }
 
-// ============================================
-// System (Claude-OS unique endpoints)
-// ============================================
+// ═══ System ═══
 async function handleSystem(req: http.IncomingMessage, res: http.ServerResponse, parts: string[]) {
   const sub = parts[3];
-
   if (sub === "genome" && req.method === "GET") {
-    const genomePath = path.join(STATE_DIR, "genome", "manifest.json");
-    if (fs.existsSync(genomePath)) return json(res, 200, JSON.parse(fs.readFileSync(genomePath, "utf-8")));
-    // Try from Supabase
-    const { data } = await supabase.from("system_state").select("value").eq("key", "genome").single();
-    if (data) return json(res, 200, data.value);
-    return err(res, 404, "Genome not initialized");
-
-  } else if (sub === "awareness" && req.method === "GET") {
-    const statusPath = path.join(STATE_DIR, "awareness", "system-status.json");
-    const healthPath = path.join(STATE_DIR, "awareness", "health.json");
-    const result: any = {};
-    if (fs.existsSync(statusPath)) result.status = JSON.parse(fs.readFileSync(statusPath, "utf-8"));
-    if (fs.existsSync(healthPath)) result.health = JSON.parse(fs.readFileSync(healthPath, "utf-8"));
-    const streamPath = path.join(STATE_DIR, "awareness", "signal-stream.jsonl");
-    if (fs.existsSync(streamPath)) {
-      result.recent_signals = fs.readFileSync(streamPath, "utf-8").trim().split("\n").slice(-20)
-        .map((l: string) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
-    }
-    return json(res, 200, result);
-
-  } else if (sub === "evolve" && req.method === "POST") {
-    const body = JSON.parse(await readBody(req));
-    if (!body.action || !body.target) return err(res, 400, "Missing action or target");
-    try {
-      const result = execSync(`claude-os-evolve ${body.action} ${body.target}`, {
-        encoding: "utf-8", timeout: 30000, env: { ...process.env, CLAUDE_OS_STATE: STATE_DIR },
-      });
-      return json(res, 200, { action: body.action, target: body.target, result: result.trim() });
-    } catch (e: any) {
-      return err(res, 500, e.message);
-    }
-
-  } else if (sub === "evolution" && req.method === "GET") {
-    const logPath = path.join(STATE_DIR, "evolution", "log.json");
-    if (fs.existsSync(logPath)) return json(res, 200, JSON.parse(fs.readFileSync(logPath, "utf-8")));
-    return err(res, 404, "Evolution log not found");
+    const p = path.join(STATE_DIR, "genome", "manifest.json");
+    return fs.existsSync(p) ? json(res, 200, JSON.parse(fs.readFileSync(p, "utf-8"))) : err(res, 404, "Genome not initialized");
   }
-  err(res, 404, "Unknown system endpoint");
+  if (sub === "awareness" && req.method === "GET") {
+    const r: any = {};
+    const sp = path.join(STATE_DIR, "awareness", "system-status.json");
+    const hp = path.join(STATE_DIR, "awareness", "health.json");
+    if (fs.existsSync(sp)) r.status = JSON.parse(fs.readFileSync(sp, "utf-8"));
+    if (fs.existsSync(hp)) r.health = JSON.parse(fs.readFileSync(hp, "utf-8"));
+    const sl = path.join(STATE_DIR, "awareness", "signal-stream.jsonl");
+    if (fs.existsSync(sl)) r.recent_signals = fs.readFileSync(sl,"utf-8").trim().split("\n").slice(-20).map(l=>{try{return JSON.parse(l)}catch{return null}}).filter(Boolean);
+    return json(res, 200, r);
+  }
+  if (sub === "evolve" && req.method === "POST") {
+    const b = JSON.parse(await readBody(req));
+    if (!b.action||!b.target) return err(res, 400, "Missing action/target");
+    try { return json(res, 200, { result: execSync(`claude-os-evolve ${b.action} ${b.target}`, { encoding:"utf-8", timeout:30000, env:{...process.env, CLAUDE_OS_STATE:STATE_DIR} }).trim() }); }
+    catch (e: any) { return err(res, 500, e.message); }
+  }
+  if (sub === "evolution" && req.method === "GET") {
+    const p = path.join(STATE_DIR, "evolution", "log.json");
+    return fs.existsSync(p) ? json(res, 200, JSON.parse(fs.readFileSync(p, "utf-8"))) : err(res, 404, "Not found");
+  }
+  err(res, 404, "Unknown endpoint");
 }
 
-// ============================================
-// Memory (Neo4j graph)
-// ============================================
+// ═══ Memory (Neo4j) ═══
 async function handleMemory(req: http.IncomingMessage, res: http.ServerResponse, parts: string[]) {
   const sub = parts[3];
-
+  if (!hasNeo4j) return err(res, 503, "Neo4j not available");
   if (sub === "search") {
-    const url = new URL(req.url!, `http://localhost`);
-    let query = url.searchParams.get("q") || "";
-    if (req.method === "POST") {
-      const body = JSON.parse(await readBody(req));
-      query = body.query || body.q || "";
-    }
-    if (!query) return err(res, 400, "Missing query");
-    const results = await graph.recall(query);
-    return json(res, 200, { results });
-
-  } else if (sub === "remember" && req.method === "POST") {
-    const body = JSON.parse(await readBody(req));
-    const id = await graph.remember(body.type || "fact", body.name, body.content, body.tags || "");
-    return json(res, 201, { id, name: body.name });
-
-  } else if (sub === "relate" && req.method === "POST") {
-    const body = JSON.parse(await readBody(req));
-    await graph.relate(body.source_id, body.target_id, body.relation || "RELATED_TO", body.weight || 1.0);
-    return json(res, 200, { related: true });
-
-  } else if (sub === "neighbors") {
-    const url = new URL(req.url!, `http://localhost`);
-    const entityId = url.searchParams.get("id") || parts[4];
-    const hops = parseInt(url.searchParams.get("hops") || "1");
-    if (!entityId) return err(res, 400, "Missing entity id");
-    const results = await graph.neighbors(entityId, hops);
-    return json(res, 200, { neighbors: results });
-
-  } else if (sub === "context") {
-    const url = new URL(req.url!, `http://localhost`);
-    const budget = parseInt(url.searchParams.get("budget") || "4000");
-    const focus = url.searchParams.get("focus") || undefined;
-    const result = await graph.contextLoad(budget, focus);
-    return json(res, 200, result);
-
-  } else if (sub === "stats") {
-    const stats = await graph.stats();
-    return json(res, 200, stats);
-
-  } else if (sub === "forget" && req.method === "POST") {
-    const body = JSON.parse(await readBody(req));
-    await graph.forget(body.id);
-    return json(res, 200, { forgotten: body.id });
+    const url = new URL(req.url!, "http://localhost");
+    let q = url.searchParams.get("q") || "";
+    if (req.method === "POST") { const b = JSON.parse(await readBody(req)); q = b.query || b.q || ""; }
+    return q ? json(res, 200, { results: await graph.recall(q) }) : err(res, 400, "Missing query");
   }
-  err(res, 404, "Unknown memory endpoint");
+  if (sub === "remember" && req.method === "POST") {
+    const b = JSON.parse(await readBody(req));
+    return json(res, 201, { id: await graph.remember(b.type||"fact", b.name, b.content, b.tags||"") });
+  }
+  if (sub === "relate" && req.method === "POST") {
+    const b = JSON.parse(await readBody(req));
+    await graph.relate(b.source_id, b.target_id, b.relation||"RELATED_TO", b.weight||1.0);
+    return json(res, 200, { ok: true });
+  }
+  if (sub === "neighbors") {
+    const url = new URL(req.url!, "http://localhost");
+    const id = url.searchParams.get("id") || parts[4];
+    return id ? json(res, 200, { neighbors: await graph.neighbors(id, parseInt(url.searchParams.get("hops")||"1")) }) : err(res, 400, "Missing id");
+  }
+  if (sub === "context") {
+    const url = new URL(req.url!, "http://localhost");
+    return json(res, 200, await graph.contextLoad(parseInt(url.searchParams.get("budget")||"4000"), url.searchParams.get("focus")||undefined));
+  }
+  if (sub === "stats") { return json(res, 200, await graph.stats()); }
+  if (sub === "forget" && req.method === "POST") {
+    const b = JSON.parse(await readBody(req)); await graph.forget(b.id); return json(res, 200, { ok: true });
+  }
+  err(res, 404, "Unknown endpoint");
 }
 
-// ============================================
-// HTTP Server
-// ============================================
-let hasSupabase = false;
-let hasNeo4j = false;
-
+// ═══ Main ═══
 async function main() {
   console.log("Initializing Claude-OS Platform...");
 
-  // Connect to backends (optional — graceful degradation)
-  try {
-    await waitForDb();
-    hasSupabase = true;
-    console.log("Supabase: connected");
-  } catch (e) {
-    console.log("Supabase: not available (standalone mode)");
-  }
+  try { await initDb(); hasDb = true; } catch (e: any) { console.log("Postgres: not available —", e.message?.slice(0, 60)); }
+  try { await initNeo4j(); hasNeo4j = true; } catch (e: any) { console.log("Neo4j: not available —", e.message?.slice(0, 60)); }
 
-  try {
-    await initNeo4j();
-    hasNeo4j = true;
-    console.log("Neo4j: connected");
-  } catch (e) {
-    console.log("Neo4j: not available (standalone mode)");
-  }
-
-  let defaultToken = "";
-  if (hasSupabase) {
-    defaultToken = await ensureDefaultToken();
-  } else {
-    // File-based token fallback for standalone mode
-    const tokenFile = path.join(STATE_DIR, "platform", "api-token");
-    const crypto = await import("crypto");
-    if (fs.existsSync(tokenFile)) {
-      defaultToken = fs.readFileSync(tokenFile, "utf-8").trim();
-    } else {
-      defaultToken = `cos_${crypto.randomBytes(24).toString("hex")}`;
-      fs.mkdirSync(path.dirname(tokenFile), { recursive: true });
-      fs.writeFileSync(tokenFile, defaultToken, { mode: 0o600 });
+  let token = "";
+  if (hasDb) { token = await ensureDefaultToken(); }
+  else {
+    const tf = path.join(STATE_DIR, "platform", "api-token");
+    if (fs.existsSync(tf)) { token = fs.readFileSync(tf, "utf-8").trim(); }
+    else {
+      const crypto = await import("crypto");
+      token = `cos_${crypto.randomBytes(24).toString("hex")}`;
+      fs.mkdirSync(path.dirname(tf), { recursive: true });
+      fs.writeFileSync(tf, token, { mode: 0o600 });
     }
   }
-  console.log(`Default API token: ${defaultToken}`);
 
   const server = http.createServer(async (req, res) => {
     if (req.method === "OPTIONS") {
-      res.writeHead(204, {
-        "Access-Control-Allow-Origin": "*",
-        "Access-Control-Allow-Methods": "GET, POST, PATCH, DELETE, OPTIONS",
-        "Access-Control-Allow-Headers": "Content-Type, Authorization",
-      });
+      res.writeHead(204, { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "GET,POST,PATCH,DELETE,OPTIONS", "Access-Control-Allow-Headers": "Content-Type,Authorization" });
       return res.end();
     }
-
     const url = new URL(req.url!, `http://localhost:${PORT}`);
     const parts = url.pathname.split("/").filter(Boolean);
 
-    // Health (no auth)
-    if (parts[0] === "v1" && parts[1] === "health") {
-      return json(res, 200, { status: "ok", version: "0.4.0", backends: { supabase: hasSupabase, neo4j: hasNeo4j } });
-    }
+    if (parts[0] === "v1" && parts[1] === "health") return json(res, 200, { status: "ok", version: "0.4.0", backends: { postgres: hasDb, neo4j: hasNeo4j } });
 
-    // Portal (no auth for the page itself)
-    if (url.pathname === "/" || url.pathname === "/portal" || url.pathname === "/portal/") {
-      const portalPaths = [
-        path.join(import.meta.dirname, "..", "portal", "index.html"),
-        path.join(STATE_DIR, "platform", "portal", "index.html"),
-        "/opt/claude-os/portal/index.html",
-      ];
-      for (const p of portalPaths) {
-        if (fs.existsSync(p)) {
-          res.writeHead(200, { "Content-Type": "text/html", "Access-Control-Allow-Origin": "*" });
-          return res.end(fs.readFileSync(p, "utf-8"));
-        }
+    if (url.pathname === "/" || url.pathname.startsWith("/portal")) {
+      for (const p of [path.join(import.meta.dirname,"..","portal","index.html"), path.join(STATE_DIR,"platform","portal","index.html"), "/opt/claude-os/portal/index.html"]) {
+        if (fs.existsSync(p)) { res.writeHead(200, {"Content-Type":"text/html","Access-Control-Allow-Origin":"*"}); return res.end(fs.readFileSync(p,"utf-8")); }
       }
       return err(res, 404, "Portal not found");
     }
 
-    // Auth for all API endpoints
-    const authHeader = req.headers.authorization;
-    const bearerToken = authHeader?.startsWith("Bearer ") ? authHeader.slice(7) : "";
+    const bearer = req.headers.authorization?.startsWith("Bearer ") ? req.headers.authorization.slice(7) : "";
     let authed = false;
-    if (hasSupabase) {
-      authed = bearerToken ? await validateToken(bearerToken) : false;
-    } else {
-      // Standalone: check against file-based token
-      const tokenFile = path.join(STATE_DIR, "platform", "api-token");
-      const storedToken = fs.existsSync(tokenFile) ? fs.readFileSync(tokenFile, "utf-8").trim() : "";
-      authed = bearerToken === storedToken && storedToken !== "";
-    }
-    if (!authed) {
-      return err(res, 401, "Unauthorized. Set Authorization: Bearer <token>");
-    }
+    if (hasDb) { authed = bearer ? await validateToken(bearer) : false; }
+    else { const tf = path.join(STATE_DIR,"platform","api-token"); authed = bearer === (fs.existsSync(tf)?fs.readFileSync(tf,"utf-8").trim():""); }
+    if (!authed) return err(res, 401, "Unauthorized");
 
     try {
-      if (parts[0] === "v1") {
-        switch (parts[1]) {
-          case "agents": return await handleAgents(req, res, parts);
-          case "sessions": return await handleSessions(req, res, parts);
-          case "system": return await handleSystem(req, res, parts);
-          case "memory": return await handleMemory(req, res, parts);
-        }
+      if (parts[0]==="v1") switch(parts[1]) {
+        case "agents": return await handleAgents(req,res,parts);
+        case "sessions": return await handleSessions(req,res,parts);
+        case "system": return await handleSystem(req,res,parts);
+        case "memory": return await handleMemory(req,res,parts);
       }
       err(res, 404, "Not found");
-    } catch (e: any) {
-      console.error("Request error:", e.message);
-      err(res, 500, e.message);
-    }
+    } catch (e: any) { console.error("Error:", e.message); err(res, 500, e.message); }
   });
 
   server.listen(PORT, "0.0.0.0", () => {
-    console.log(`\nClaude-OS Platform running on http://0.0.0.0:${PORT}`);
-    console.log(`  Portal:     http://localhost:${PORT}/`);
-    console.log(`  API:        http://localhost:${PORT}/v1/...`);
-    console.log(`  Neo4j UI:   http://localhost:7474/`);
-    console.log(`  Supabase:   http://localhost:54321/`);
+    console.log(`\nClaude-OS Platform on http://0.0.0.0:${PORT}`);
+    console.log(`  Portal:   http://localhost:${PORT}/`);
+    console.log(`  Postgres: ${hasDb ? 'connected' : 'standalone mode'}`);
+    console.log(`  Neo4j:    ${hasNeo4j ? 'connected' : 'standalone mode'}`);
+    console.log(`  Token:    ${token.slice(0,20)}...`);
   });
 
-  process.on("SIGTERM", async () => { await closeNeo4j(); process.exit(0); });
+  process.on("SIGTERM", async () => { await closeDb(); await closeNeo4j(); process.exit(0); });
 }
 
-main().catch((e) => { console.error("Fatal:", e); process.exit(1); });
+main().catch(e => { console.error("Fatal:", e); process.exit(1); });
