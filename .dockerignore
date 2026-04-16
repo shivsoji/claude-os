@@ -1,0 +1,9 @@
+.git
+result
+result-*
+*.qcow2
+*.iso
+node_modules
+.direnv
+.claude
+flake.lock

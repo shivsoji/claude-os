@@ -1,0 +1,25 @@
+services:
+  claude-os:
+    build: .
+    container_name: claude-os
+    hostname: claude-os
+    ports:
+      - "2222:22"      # SSH
+      - "8420:8420"    # Platform API
+      - "11434:11434"  # Ollama (if started)
+    volumes:
+      - claude-os-state:/var/lib/claude-os
+    environment:
+      - CLAUDE_OS_STATE=/var/lib/claude-os
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - OLLAMA_URL=http://127.0.0.1:11434
+    restart: unless-stopped
+    # Resource limits
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+          cpus: "4.0"
+
+volumes:
+  claude-os-state:
