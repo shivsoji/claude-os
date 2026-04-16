@@ -1,7 +1,7 @@
 import { execSync } from "child_process";
 import * as fs from "fs";
 import * as path from "path";
-import { db, genId } from "../db/index.ts";
+import { supabase, genId } from "../db/index.ts";
 
 const STATE_DIR = process.env.CLAUDE_OS_STATE || "/var/lib/claude-os";
 const OLLAMA_URL = process.env.OLLAMA_URL || "http://127.0.0.1:11434";
@@ -34,14 +34,17 @@ export function subscribeSession(sessionId: string, cb: EventCallback) {
   return () => sessionListeners.get(sessionId)?.delete(cb);
 }
 
-function emitEvent(sessionId: string, event: any) {
-  // Store in DB
-  db.run(
-    "INSERT INTO events (id, session_id, type, role, content, processed_at) VALUES (?, ?, ?, ?, ?, datetime('now'))",
-    event.id, sessionId, event.type, event.role, JSON.stringify(event)
-  );
+async function emitEvent(sessionId: string, event: any) {
+  // Store in Supabase
+  await supabase.from("events").insert({
+    id: event.id,
+    session_id: sessionId,
+    type: event.type,
+    role: event.role,
+    content: event,
+  });
 
-  // Notify listeners
+  // Notify in-process listeners
   sessionListeners.get(sessionId)?.forEach((cb) => cb(event));
 }
 
@@ -204,18 +207,19 @@ export async function executeMessage(
   sessionId: string,
   userMessage: string
 ): Promise<void> {
-  const session = db.get("SELECT * FROM sessions WHERE id = ?", sessionId) as any;
+  const { data: session } = await supabase.from("sessions").select("*").eq("id", sessionId).single();
   if (!session) throw new Error("Session not found");
   if (session.status === "archived") throw new Error("Session is archived");
 
-  const agent: AgentConfig = JSON.parse(session.agent_snapshot);
+  const agent: AgentConfig = typeof session.agent_snapshot === "string"
+    ? JSON.parse(session.agent_snapshot) : session.agent_snapshot;
   const systemPrompt = buildSystemPrompt(agent);
 
   // Update status
-  db.run("UPDATE sessions SET status = 'running', updated_at = datetime('now') WHERE id = ?", sessionId);
+  await supabase.from("sessions").update({ status: "running" }).eq("id", sessionId);
 
   // Emit user message event
-  emitEvent(sessionId, {
+    await emitEvent(sessionId, {
     id: genId("evt"),
     type: "message",
     role: "user",
@@ -223,12 +227,15 @@ export async function executeMessage(
   });
 
   // Build conversation history from events
-  const history = db
-    .prepare("SELECT type, role, content FROM events WHERE session_id = ? AND type = 'message' ORDER BY processed_at")
-    .all(sessionId) as any[];
+  const { data: history } = await supabase
+    .from("events")
+    .select("type, role, content")
+    .eq("session_id", sessionId)
+    .eq("type", "message")
+    .order("processed_at");
 
-  const messages = history.map((e: any) => {
-    const parsed = JSON.parse(e.content);
+  const messages = (history || []).map((e: any) => {
+    const parsed = typeof e.content === "string" ? JSON.parse(e.content) : e.content;
     return { role: e.role === "agent" ? "assistant" : "user", content: parsed.content || parsed.text || "" };
   });
 
@@ -246,19 +253,19 @@ export async function executeMessage(
     try {
       if (agent.model_provider === "claude" && process.env.ANTHROPIC_API_KEY) {
         result = await callClaude(agent.model_id, systemPrompt, messages, toolDefs);
-        db.run("UPDATE sessions SET usage_claude_calls = usage_claude_calls + 1 WHERE id = ?", sessionId);
+        await supabase.rpc("increment_field", { table_name: "sessions", field: "usage_claude_calls", row_id: sessionId }).catch(() => {});
       } else {
         // Ollama (default / fallback)
         const ollamaMessages = [{ role: "system", content: systemPrompt }, ...messages];
         result = await callOllama(agent.model_id || "gemma4:31b-cloud", ollamaMessages, toolDefs);
-        db.run("UPDATE sessions SET usage_ollama_calls = usage_ollama_calls + 1 WHERE id = ?", sessionId);
+        await supabase.from("sessions").update({ usage_ollama_calls: (session.usage_ollama_calls || 0) + 1 }).eq("id", sessionId);
       }
     } catch (e: any) {
       // Try fallback
       if (agent.model_fallback === "ollama") {
         const ollamaMessages = [{ role: "system", content: systemPrompt }, ...messages];
         result = await callOllama("gemma4:31b-cloud", ollamaMessages, toolDefs);
-        db.run("UPDATE sessions SET usage_ollama_calls = usage_ollama_calls + 1 WHERE id = ?", sessionId);
+        await supabase.from("sessions").update({ usage_ollama_calls: (session.usage_ollama_calls || 0) + 1 }).eq("id", sessionId);
       } else {
         throw e;
       }
@@ -266,7 +273,7 @@ export async function executeMessage(
 
     // Emit agent message
     if (result.content) {
-      emitEvent(sessionId, {
+    await emitEvent(sessionId, {
         id: genId("evt"),
         type: "message",
         role: "agent",
@@ -278,7 +285,7 @@ export async function executeMessage(
     // Handle tool calls
     if (result.tool_calls && result.tool_calls.length > 0) {
       for (const tc of result.tool_calls) {
-        emitEvent(sessionId, {
+    await emitEvent(sessionId, {
           id: genId("evt"),
           type: "tool_call",
           role: "agent",
@@ -288,7 +295,7 @@ export async function executeMessage(
         // Execute tool
         const toolResult = executeTool(tc, sessionId);
 
-        emitEvent(sessionId, {
+    await emitEvent(sessionId, {
           id: genId("evt"),
           type: "tool_result",
           role: "system",
@@ -296,7 +303,7 @@ export async function executeMessage(
         });
 
         messages.push({ role: "user", content: `Tool result for ${tc.name}: ${toolResult}` });
-        db.run("UPDATE sessions SET tools_used = tools_used + 1 WHERE id = ?", sessionId);
+        await supabase.from("sessions").update({ tools_used: (session.tools_used || 0) + 1 }).eq("id", sessionId);
       }
       // Continue loop for next agent turn after tool results
       continue;
@@ -307,12 +314,12 @@ export async function executeMessage(
   }
 
   // Update session stats
-  db.run(
-    "UPDATE sessions SET status = 'idle', turns = turns + ?, updated_at = datetime('now') WHERE id = ?",
-    turns, sessionId
-  );
+  await supabase.from("sessions").update({
+    status: "idle",
+    turns: (session.turns || 0) + turns,
+  }).eq("id", sessionId);
 
-  emitEvent(sessionId, {
+    await emitEvent(sessionId, {
     id: genId("evt"),
     type: "status",
     role: "system",
